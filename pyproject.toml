@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fractionally"
-version = "0.1.0"
+version = "0.1.1"
 description = "Persistent memory layer for LLM agents. Zero LLM calls, sub-100ms ingestion, deterministic extraction."
 readme = "README.md"
 license = {text = "MIT"}
@@ -39,6 +39,9 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
+]
+llm = [
+    "litellm>=1.0",
 ]
 ensemble = [
     "transformers>=4.30",

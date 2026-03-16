@@ -9,7 +9,7 @@ import os
 import time
 from collections import defaultdict
 
-from benchmarks.metrics import calculate_bleu1, calculate_f1, llm_judge
+from benchmarks.metrics import calculate_bleu1, calculate_f1, llm_judge, binary_llm_judge
 from benchmarks.prompts import ANSWER_PROMPT
 
 
@@ -27,13 +27,17 @@ def run_fraction_benchmark(
     compression_rate: float = 0.6,
     max_conversations: int = None,
     skip_llm_judge: bool = False,
+    compressor_type: str = "llmlingua2",
+    judge_mode: str = "both",  # "likert" | "binary" | "both"
+    openai_api_key: str = None,
+    extractor_model: str = "gpt-4o-mini",
 ):
     """Run the full LoCoMo benchmark using Fraction.
 
     Steps:
     1. For each conversation: add all turns via fraction.add()
     2. For each question: search memories, generate answer via OpenAI
-    3. Evaluate: BLEU-1, F1, LLM judge
+    3. Evaluate: BLEU-1, F1, LLM judge (Likert and/or binary)
     4. Save results to JSON and markdown report
     """
     from openai import OpenAI
@@ -41,7 +45,8 @@ def run_fraction_benchmark(
     from fraction import Fraction, FractionConfig
 
     os.makedirs(output_dir, exist_ok=True)
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
+    client = OpenAI(api_key=api_key)
 
     # Load dataset
     dataset = load_dataset(dataset_path)
@@ -65,6 +70,9 @@ def run_fraction_benchmark(
             metadata_path=os.path.join(output_dir, f"_tmp_{conv_id}_meta.json"),
             history_db_path=os.path.join(output_dir, f"_tmp_{conv_id}_history.db"),
             compression_rate=compression_rate,
+            compressor_type=compressor_type,
+            llm_api_key=api_key,
+            llm_model=extractor_model,
         )
         fraction = Fraction(config)
 
@@ -191,8 +199,12 @@ def run_fraction_benchmark(
             bleu = calculate_bleu1(pred_answer, gt_answer)
             f1 = calculate_f1(pred_answer, gt_answer)
             judge_score = 3.0
+            binary_score = 0.5
             if not skip_llm_judge and pred_answer:
-                judge_score = llm_judge(question, gt_answer, pred_answer, client)
+                if judge_mode in ("likert", "both"):
+                    judge_score = llm_judge(question, gt_answer, pred_answer, client)
+                if judge_mode in ("binary", "both"):
+                    binary_score = binary_llm_judge(question, gt_answer, pred_answer, client)
 
             result = {
                 "question": question,
@@ -202,11 +214,17 @@ def run_fraction_benchmark(
                 "bleu_score": bleu,
                 "f1_score": f1,
                 "llm_score": judge_score,
+                "binary_score": binary_score,
             }
             conv_results.append(result)
             all_metrics[category].append(result)
 
-            print(f"  Q: {question[:60]}... | BLEU: {bleu:.3f} F1: {f1:.3f} Judge: {judge_score}")
+            score_str = f"BLEU: {bleu:.3f} F1: {f1:.3f}"
+            if judge_mode in ("likert", "both"):
+                score_str += f" Judge: {judge_score}"
+            if judge_mode in ("binary", "both"):
+                score_str += f" Binary: {binary_score:.0f}"
+            print(f"  Q: {question[:60]}... | {score_str}")
 
         all_results[conv_id] = conv_results
 
@@ -225,6 +243,8 @@ def run_fraction_benchmark(
         "compression_rate": compression_rate,
         "top_k": top_k,
         "openai_model": openai_model,
+        "compressor_type": compressor_type,
+        "judge_mode": judge_mode,
     })
 
     # Save JSON results
@@ -250,11 +270,13 @@ def build_report(all_results, all_metrics, timing, config):
     all_bleu = []
     all_f1 = []
     all_judge = []
+    all_binary = []
     for results in all_results.values():
         for r in results:
             all_bleu.append(r["bleu_score"])
             all_f1.append(r["f1_score"])
             all_judge.append(r["llm_score"])
+            all_binary.append(r.get("binary_score", 0.5))
 
     # Per-category metrics
     by_category = {}
@@ -262,10 +284,12 @@ def build_report(all_results, all_metrics, timing, config):
         bleus = [r["bleu_score"] for r in results]
         f1s = [r["f1_score"] for r in results]
         judges = [r["llm_score"] for r in results]
+        binaries = [r.get("binary_score", 0.5) for r in results]
         by_category[cat] = {
             "bleu1": round(float(np.mean(bleus)), 4) if bleus else 0,
             "f1": round(float(np.mean(f1s)), 4) if f1s else 0,
             "llm_judge": round(float(np.mean(judges)), 4) if judges else 0,
+            "binary_judge": round(float(np.mean(binaries)), 4) if binaries else 0,
             "count": len(results),
         }
 
@@ -275,6 +299,7 @@ def build_report(all_results, all_metrics, timing, config):
             "bleu1": round(float(np.mean(all_bleu)), 4) if all_bleu else 0,
             "f1": round(float(np.mean(all_f1)), 4) if all_f1 else 0,
             "llm_judge": round(float(np.mean(all_judge)), 4) if all_judge else 0,
+            "binary_judge": round(float(np.mean(all_binary)), 4) if all_binary else 0,
             "total_questions": len(all_bleu),
         },
         "by_category": by_category,
@@ -301,13 +326,19 @@ def generate_markdown_report(report: dict) -> str:
 
     # Overall
     overall = report.get("overall", {})
+    compressor = report.get("config", {}).get("compressor_type", "llmlingua2")
+    judge_mode = report.get("config", {}).get("judge_mode", "both")
     lines.append("## Overall Results")
+    lines.append(f"\n**Compressor:** {compressor}")
     lines.append("")
     lines.append("| Metric | Fraction | mem0 (reference) | supermemory (reference) |")
     lines.append("|--------|----------|------------------|------------------------|")
     lines.append(f"| BLEU-1 | **{overall.get('bleu1', 0):.4f}** | ~0.35 | ~0.38 |")
     lines.append(f"| F1 | **{overall.get('f1', 0):.4f}** | ~0.40 | ~0.45 |")
-    lines.append(f"| LLM Judge (1-5) | **{overall.get('llm_judge', 0):.2f}** | ~3.2 | ~3.5 |")
+    if judge_mode in ("likert", "both"):
+        lines.append(f"| LLM Judge (1-5) | **{overall.get('llm_judge', 0):.2f}** | ~3.2 | ~3.5 |")
+    if judge_mode in ("binary", "both"):
+        lines.append(f"| LLM Judge (0/1) | **{overall.get('binary_judge', 0):.4f}** | ~0.669 | — |")
     lines.append(f"| Total Questions | {overall.get('total_questions', 0)} | - | - |")
     lines.append("")
 
@@ -333,12 +364,27 @@ def generate_markdown_report(report: dict) -> str:
             "3": "Temporal",
             "4": "Open-domain",
         }
-        lines.append("| Category | BLEU-1 | F1 | LLM Judge | Count |")
-        lines.append("|----------|--------|-----|-----------|-------|")
-        for cat in sorted(by_cat.keys()):
-            m = by_cat[cat]
-            name = cat_names.get(cat, f"Cat {cat}")
-            lines.append(f"| {name} | {m['bleu1']:.4f} | {m['f1']:.4f} | {m['llm_judge']:.2f} | {m['count']} |")
+        if judge_mode == "both":
+            lines.append("| Category | BLEU-1 | F1 | Judge (1-5) | Judge (0/1) | Count |")
+            lines.append("|----------|--------|-----|-------------|-------------|-------|")
+            for cat in sorted(by_cat.keys()):
+                m = by_cat[cat]
+                name = cat_names.get(cat, f"Cat {cat}")
+                lines.append(f"| {name} | {m['bleu1']:.4f} | {m['f1']:.4f} | {m['llm_judge']:.2f} | {m.get('binary_judge', 0):.4f} | {m['count']} |")
+        elif judge_mode == "binary":
+            lines.append("| Category | BLEU-1 | F1 | Judge (0/1) | Count |")
+            lines.append("|----------|--------|-----|-------------|-------|")
+            for cat in sorted(by_cat.keys()):
+                m = by_cat[cat]
+                name = cat_names.get(cat, f"Cat {cat}")
+                lines.append(f"| {name} | {m['bleu1']:.4f} | {m['f1']:.4f} | {m.get('binary_judge', 0):.4f} | {m['count']} |")
+        else:
+            lines.append("| Category | BLEU-1 | F1 | Judge (1-5) | Count |")
+            lines.append("|----------|--------|-----|-------------|-------|")
+            for cat in sorted(by_cat.keys()):
+                m = by_cat[cat]
+                name = cat_names.get(cat, f"Cat {cat}")
+                lines.append(f"| {name} | {m['bleu1']:.4f} | {m['f1']:.4f} | {m['llm_judge']:.2f} | {m['count']} |")
         lines.append("")
 
     # Key advantages

@@ -2,7 +2,11 @@
 
 Persistent memory layer for LLM agents and AI applications. Zero API costs, sub-100ms ingestion, fully offline.
 
-Fraction replaces LLM-based memory extraction (used by mem0, supermemory) with learned token compression ([LLMLingua-2](https://arxiv.org/abs/2403.12968)), giving you deterministic, fast, and free memory operations.
+Fraction supports two extraction modes:
+- **LLMLingua-2** (default) — learned token compression, zero API cost, fully offline
+- **LLM extraction** — any LLM provider via [litellm](https://github.com/BerriAI/litellm) (OpenAI, Anthropic, Ollama, etc.)
+
+Both modes use the same hybrid retrieval layer: vector similarity + BM25 + entity graph + temporal boost, merged via Reciprocal Rank Fusion.
 
 ## Installation
 
@@ -11,6 +15,9 @@ pip install fractionally
 
 # Download the spaCy model for entity extraction
 python -m spacy download en_core_web_sm
+
+# Optional: install litellm for LLM-based extraction (supports any provider)
+pip install fractionally[llm]
 ```
 
 ## Quick Start
@@ -35,9 +42,10 @@ for r in results["results"]:
 
 ## Features
 
-- **Zero API cost** — compression + embedding + retrieval run locally
+- **Two extraction modes** — LLMLingua-2 (free, offline) or LLM-based (any provider via litellm)
+- **Zero API cost** (default mode) — compression + embedding + retrieval run locally
 - **Sub-100ms ingestion** — LLMLingua-2 compression + USearch indexing
-- **Deterministic** — same input always produces same memory
+- **Deterministic** — same input always produces same memory (LLMLingua mode)
 - **Hybrid retrieval** — vector similarity + BM25 keywords + entity graph, merged via Reciprocal Rank Fusion
 - **Auto-persistence** — memories survive process restarts
 - **Scoping** — isolate memories by `user_id`, `agent_id`, or `run_id`
@@ -60,6 +68,13 @@ m = Memory(data_dir="./my_project_memory")
 # With custom config
 from fraction import FractionConfig
 m = Memory(config=FractionConfig(compression_rate=0.5, top_k=5))
+
+# With LLM-based extraction (any litellm-supported provider)
+m = Memory(config=FractionConfig(compressor_type="llm", llm_model="gpt-4o-mini"))
+
+# Use Anthropic, Ollama, or any other provider
+m = Memory(config=FractionConfig(compressor_type="llm", llm_model="anthropic/claude-sonnet-4-20250514"))
+m = Memory(config=FractionConfig(compressor_type="llm", llm_model="ollama/llama3"))
 
 # Context manager
 with Memory(data_dir="./temp") as m:
@@ -153,14 +168,28 @@ Four retrieval signals merged via Reciprocal Rank Fusion:
 
 Evaluated on LoCoMo (1540 questions across 10 multi-session conversations):
 
+### LLMLingua-2 mode (no LLM, zero API cost)
+
 | Metric | Fraction | mem0 | supermemory |
 |--------|----------|------|-------------|
-| BLEU-1 | **0.42** | ~0.35 | ~0.38 |
+| BLEU-1 | **0.41** | ~0.35 | ~0.38 |
 | F1 | **0.44** | ~0.40 | ~0.45 |
-| LLM Judge (1-5) | **3.67** | ~3.2 | ~3.5 |
-| add() latency (p50) | **414ms** | 708ms | — |
-| search() latency (p50) | **150ms** | ~200ms | — |
+| LLM Judge (1-5) | **3.66** | ~3.2 | ~3.5 |
+| LLM Judge (0/1) | **0.62** | ~0.669 | — |
+| add() latency (p50) | **449ms** | 708ms | — |
+| search() latency (p50) | **160ms** | ~200ms | — |
 | API cost (memory ops) | **$0** | per-call | per-call |
+
+### LLM extraction mode (using gpt-4o-mini)
+
+| Metric | Fraction (LLM) | Fraction (LLMLingua) |
+|--------|---------------|---------------------|
+| BLEU-1 | 0.40 | **0.41** |
+| F1 | 0.43 | **0.44** |
+| LLM Judge (1-5) | 3.60 | **3.66** |
+| LLM Judge (0/1) | 0.61 | **0.62** |
+| add() latency (p50) | 1385ms | **449ms** |
+| search() latency (p50) | 160ms | 160ms |
 
 ## Configuration
 
@@ -169,9 +198,14 @@ All options with defaults:
 ```python
 FractionConfig(
     # Compression
-    compressor_type="llmlingua2",   # "llmlingua2" | "self_info" | "ensemble"
+    compressor_type="llmlingua2",   # "llmlingua2" | "self_info" | "ensemble" | "llm"
     compression_rate=0.6,           # retain 60% of tokens
     adaptive_compression=True,      # skip compression for very short texts
+
+    # LLM extraction (when compressor_type="llm") — uses litellm
+    llm_model="gpt-4o-mini",        # any litellm model string
+    llm_api_key=None,               # falls back to provider env vars
+    llm_api_base=None,              # custom API base (for self-hosted/ollama)
 
     # Relevance gate
     relevance_gate=True,            # skip filler turns

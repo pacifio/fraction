@@ -38,3 +38,13 @@ Rate the quality of the generated answer on a scale of 1-5:
 5 = Perfectly correct and complete
 
 Respond with ONLY a single integer (1-5), nothing else."""
+
+
+BINARY_JUDGE_PROMPT = """You are evaluating the quality of an AI-generated answer compared to a ground truth answer.
+
+Question: {question}
+Ground Truth Answer: {ground_truth}
+Generated Answer: {predicted}
+
+Does the generated answer correctly capture the key information from the ground truth?
+Respond with ONLY 0 (incorrect) or 1 (correct), nothing else."""

@@ -1,7 +1,8 @@
 """Fraction: Persistent memory layer for LLM agents and applications.
 
-Zero LLM calls. Sub-100ms ingestion. Deterministic extraction.
-Uses LLMLingua-2 token compression + USearch vector indexing.
+Two extraction modes:
+- LLMLingua-2 (default): Zero LLM calls, sub-100ms ingestion, deterministic.
+- LLM extraction: OpenAI-powered fact extraction for higher quality.
 
 Usage:
     from fraction import Memory
@@ -16,7 +17,7 @@ from fraction.config import FractionConfig
 from fraction.memory import Fraction
 from fraction.types import CompressedFragment, MemoryItem, SearchResult
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "Memory",
     "Fraction",

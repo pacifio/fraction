@@ -47,7 +47,7 @@ def calculate_f1(predicted: str, ground_truth: str) -> float:
 
 
 def llm_judge(question: str, ground_truth: str, predicted: str, client=None) -> float:
-    """Use OpenAI to judge answer quality (1-5 scale).
+    """Use OpenAI to judge answer quality (1-5 Likert scale).
 
     Args:
         client: openai.OpenAI instance
@@ -76,3 +76,35 @@ def llm_judge(question: str, ground_truth: str, predicted: str, client=None) -> 
     except Exception as e:
         print(f"LLM judge error: {e}")
         return 3.0  # default middle score on error
+
+
+def binary_llm_judge(question: str, ground_truth: str, predicted: str, client=None) -> float:
+    """Use OpenAI to judge answer quality on 0/1 binary scale (matching mem0's evaluation).
+
+    Args:
+        client: openai.OpenAI instance
+    """
+    if client is None:
+        from openai import OpenAI
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+    from benchmarks.prompts import BINARY_JUDGE_PROMPT
+
+    prompt = BINARY_JUDGE_PROMPT.format(
+        question=question,
+        ground_truth=ground_truth,
+        predicted=predicted,
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        score_text = response.choices[0].message.content.strip()
+        score = int(re.search(r'[01]', score_text).group())
+        return float(score)
+    except Exception as e:
+        print(f"Binary judge error: {e}")
+        return 0.5  # neutral default on error
