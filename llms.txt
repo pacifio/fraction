@@ -1,0 +1,358 @@
+# Fraction — Architecture Reference for LLMs & Coding Agents
+
+> Persistent memory layer for LLM agents. Zero API costs, sub-100ms ingestion, fully offline.
+> Package: `fractionally` on PyPI. Import: `from fraction import Memory`
+
+## Overview
+
+Fraction replaces expensive per-call LLM extraction (mem0, supermemory) with learned token-level compression (LLMLingua-2) and 4-signal hybrid retrieval merged via Reciprocal Rank Fusion. All core operations run locally with no API calls.
+
+Two-tier API:
+- **Memory** (high-level): Auto-persistence wrapper, managed storage in ~/.fraction/
+- **Fraction** (low-level): Core engine with explicit save/load lifecycle
+
+Two extraction modes:
+- **LLMLingua-2** (default): BERT-sized model, zero cost, deterministic, sub-100ms
+- **LLM extraction**: Any provider via litellm (OpenAI, Anthropic, Ollama, etc.)
+
+---
+
+## File Map
+
+```
+fraction/
+├── __init__.py        # Package exports, version
+├── client.py          # Memory (high-level auto-persistence client)
+├── memory.py          # Fraction (low-level core engine)
+├── config.py          # FractionConfig (all settings)
+├── types.py           # Data models: CompressedFragment, MemoryItem, SearchResult, MemoryEvent
+├── compressor.py      # Token compression: LLMLingua2, SelfInfo, Ensemble, LLM extractors
+├── embedder.py        # SentenceTransformerEmbedder (BGE-base, 768-dim)
+├── entity.py          # spaCy NER entity extraction + relationship triples
+├── vector_store.py    # USearchVectorStore (HNSW index + metadata)
+├── graph.py           # EntityGraph (in-memory, JSON-persistent)
+├── retriever.py       # HybridRetriever (vector + BM25 + graph + temporal → RRF)
+├── storage.py         # SQLiteHistory (audit log via SQLAlchemy)
+├── utils.py           # generate_id, content_hash, now_utc, format_messages
+benchmarks/
+├── locomo.py          # LoCoMo benchmark runner
+├── metrics.py         # BLEU-1, F1, LLM judge (Likert + binary)
+├── prompts.py         # Answer generation + judge prompts
+├── generate_dataset.py # Synthetic LoCoMo dataset generator
+├── run_benchmarks.py  # CLI entry point with --compressor_type compare mode
+```
+
+---
+
+## Data Models (types.py)
+
+```python
+CompressedFragment:
+    original_text: str
+    compressed_text: str
+    compression_ratio: float
+    token_scores: list[tuple[str, float]]  # (token, importance)
+    entities: list[str]
+
+MemoryItem:
+    id: str                    # 16-char hex UUID
+    content: str               # compressed text
+    content_raw: str           # original uncompressed text
+    importance_scores: list[tuple[str, float]]
+    entities: list[str]
+    metadata: dict
+    user_id, agent_id, run_id: str | None
+    created_at, updated_at: datetime
+    hash: str                  # MD5 for dedup
+
+SearchResult:
+    id: str
+    content: str
+    score: float
+    metadata: dict
+    created_at: datetime
+
+MemoryEvent:
+    id, memory_id: str
+    event: str                 # ADD | UPDATE | DELETE
+    old_content, new_content: str | None
+    user_id: str | None
+    timestamp: datetime
+```
+
+---
+
+## Configuration (config.py)
+
+```python
+FractionConfig(
+    # Compression
+    compressor_type="llmlingua2",   # llmlingua2 | self_info | ensemble | llm
+    compression_rate=0.6,           # retain 60% of tokens
+    adaptive_compression=True,      # skip compression for ≤20 token texts
+    importance_threshold=0.0,
+
+    # LLM extraction (when compressor_type="llm") — uses litellm
+    llm_model="gpt-4o-mini",       # any litellm model string
+    llm_api_key=None,              # falls back to provider env vars
+    llm_api_base=None,             # custom base URL (Ollama, self-hosted)
+    llm_extraction_prompt=None,    # custom extraction prompt
+
+    # Relevance gate
+    relevance_gate=True,
+    min_content_words=3,
+
+    # Embedder
+    embedder_model="BAAI/bge-base-en-v1.5",
+    embedding_dim=768,
+
+    # Vector store
+    vector_store_path="fraction_index.usearch",
+    metadata_path="fraction_metadata.json",
+    metric="cos",
+    dtype="f32",
+
+    # Retrieval
+    top_k=10,
+    use_bm25=True,
+    use_graph=True,
+    rerank=True,
+    duplicate_threshold=0.95,
+    min_score_ratio=0.3,
+
+    # RRF
+    rrf_k=30,
+    rrf_weights=None,             # default: {vector:1.0, bm25:1.2, graph:0.8, temporal:1.0}
+
+    # Entity graph
+    entity_similarity_threshold=0.7,
+
+    # Storage
+    history_db_path="fraction_history.db",
+    default_user_id=None,
+)
+```
+
+---
+
+## Write Path (Ingestion)
+
+```
+User Input (str | list[str] | list[dict])
+    ↓ format_messages() → single text string
+    ↓ Compressor.compress(text, rate=0.6, adaptive=True)
+    ↓   → CompressedFragment {compressed_text, token_scores, compression_ratio}
+    ↓ EntityExtractor.extract(compressed_text)
+    ↓   → [{"text", "label", "start", "end"}]
+    ↓ Relevance Gate: skip if (no entities AND <3 content words)
+    ↓ SentenceTransformerEmbedder.embed(compressed_text)
+    ↓   → list[float] (768-dim, L2 normalized)
+    ↓ USearchVectorStore.search(embedding, limit=1) for dedup
+    ↓   → cosine ≥ 0.95 → UPDATE, else → ADD
+    ↓ USearchVectorStore.insert/update(embedding, payload)
+    ↓ HybridRetriever.add_to_corpus(memory_id, raw_text)  # BM25 index
+    ↓ EntityGraph: add entities + co-occurrence edges + relationship triples
+    ↓ SQLiteHistory.add_event(ADD|UPDATE)
+    ↓ Memory.save() if auto_save
+    → Return {id, memory, event, entities, compression_ratio, latency_ms}
+```
+
+---
+
+## Read Path (Retrieval)
+
+```
+Query string
+    ↓ Embed query → 768-dim vector
+    ↓ HybridRetriever.retrieve(query, filters, limit)
+    │
+    ├── Vector Search: USearch cosine similarity
+    ├── BM25 Search: BM25Okapi on raw (uncompressed) text corpus
+    ├── Graph Search: spaCy NER → EntityGraph.find_entity() → get_related(hops=2)
+    └── Temporal Search: regex date extraction, activated on temporal query patterns
+    │
+    ↓ RRF Fusion: score(doc) = Σ(weight_i / (k + rank_i))
+    ↓ Filter: min_score_ratio threshold, deduplication
+    → Return top-k SearchResults [{id, content, score, metadata, created_at}]
+```
+
+---
+
+## Compression Strategies (compressor.py)
+
+| Strategy | Class | Latency | Cost | Notes |
+|----------|-------|---------|------|-------|
+| llmlingua2 | LLMLingua2Scorer | 80-150ms | Free | Default. BERT-sized, deterministic. Force-preserves temporal tokens. |
+| self_info | SelfInfoScorer | 200-400ms | Free | GPT-2 self-information: I(x) = -log P(x\|context) |
+| ensemble | EnsembleScorer | 300-500ms | Free | Weighted combination of multiple scorers |
+| llm | LLMExtractorScorer | 500-2000ms | Per-call | Uses litellm. Extracts JSON {facts, entities}. 3x retry. |
+
+Factory: `build_compressor(config: FractionConfig) -> TokenScorer`
+
+Adaptive compression (when enabled):
+- ≤20 tokens → rate=1.0 (no compression)
+- 21-50 tokens → rate=0.85
+- 51-100 tokens → rate=0.7
+- >100 tokens → configured rate
+
+---
+
+## Retrieval Signals (retriever.py)
+
+| Signal | Weight | Activation | Scoring |
+|--------|--------|------------|---------|
+| Vector | 1.0 | Always | Cosine similarity via USearch |
+| BM25 | 1.2 | If corpus non-empty | TF-IDF with BM25Okapi, 23-word stoplist |
+| Graph | 0.8 | If use_graph=True | Direct match (1.0) + multi-hop (1/(1+distance)) |
+| Temporal | 1.0 | If query matches temporal regex | Exact date match (+2.0) + density (+0.1×density) |
+
+RRF: `score(doc) = Σ(weight_i / (rrf_k + rank_i(doc)))`, default rrf_k=30
+
+---
+
+## Entity Graph (graph.py)
+
+- Nodes: `{text, type, memory_ids, aliases}`, fuzzy-merged at 0.85 similarity
+- Edges: `{source, target, relation, memory_id}`, relation is "co_occurs" or dependency-parsed verb
+- Lookup: `_text_to_id` (text.lower() → node_id), `_adjacency` (BFS)
+- Multi-hop: BFS up to 2 hops, score decays by 1/(1+distance)
+- Persistence: JSON with set→list conversion
+
+---
+
+## Vector Store (vector_store.py)
+
+- USearch HNSW index, single-file memory-mapped
+- Soft deletion via `_deleted` set (avoids full rebuild)
+- Over-fetches 3× on search to account for filtered/deleted entries
+- Metadata stored per-vector in dict
+- Persistence: `.usearch` binary + `_metadata.json`
+
+---
+
+## Storage (storage.py)
+
+- SQLAlchemy ORM with SQLite backend
+- Table: `memory_history` (id, memory_id, event, old_content, new_content, user_id, timestamp)
+- Events: ADD, UPDATE, DELETE
+
+---
+
+## API Surface
+
+### Memory (client.py) — Recommended
+
+```python
+from fraction import Memory, FractionConfig
+
+m = Memory(data_dir="~/.fraction/", config=FractionConfig(...), auto_save=True)
+
+# Write
+result = m.add("text or messages", user_id="alice")
+m.update(memory_id, "new text")
+m.delete(memory_id)
+m.delete_all(user_id="alice")
+
+# Read
+results = m.search("query", user_id="alice", limit=5)
+memory = m.get(memory_id)
+all_mems = m.get_all(user_id="alice")
+history = m.history(memory_id)
+
+# Context manager
+with Memory() as m:
+    m.add("fact", user_id="u1")
+```
+
+### Fraction (memory.py) — Low-Level
+
+```python
+from fraction import Fraction, FractionConfig
+
+f = Fraction(config)
+f.add("text", user_id="alice")
+results = f.search("query", user_id="alice")
+f.save()   # manual persistence
+f.load()   # manual loading
+f.reset()  # wipe all data
+```
+
+---
+
+## Persistence Model
+
+Files per instance:
+1. `{vector_store_path}` — USearch binary HNSW index
+2. `{metadata_path}` — JSON: `{metadata: {key: payload}, next_key: int, deleted: [int]}`
+3. `{vector_store_path}_graph.json` — Entity graph nodes + edges
+4. `{history_db_path}` — SQLite audit log
+
+Memory API auto-manages all paths under `data_dir/`.
+
+---
+
+## Benchmarks Infrastructure
+
+**Dataset:** LoCoMo format — multi-session conversations with categorized questions
+**Categories:** 1=Single-hop, 2=Multi-hop, 3=Temporal, 4=Open-domain, 5=Unanswerable (skipped)
+
+**Metrics (metrics.py):**
+- `calculate_bleu1(reference, hypothesis)` — unigram precision
+- `calculate_f1(reference, hypothesis)` — token-level F1
+- `llm_judge(question, ground_truth, predicted)` — GPT-4o-mini Likert 1-5
+- `binary_llm_judge(question, ground_truth, predicted)` — GPT-4o-mini binary 0/1
+
+**CLI (run_benchmarks.py):**
+```bash
+python benchmarks/run_benchmarks.py \
+    --dataset benchmarks/dataset/locomo10.json \
+    --output reports \
+    --compressor_type llmlingua2    # or: llm, compare
+    --judge_mode both               # or: likert, binary
+    --extractor_model gpt-4o-mini
+    --compression_rate 0.6
+    --top_k 10
+```
+
+`--compressor_type compare` runs both modes back-to-back with side-by-side results table.
+
+---
+
+## Key Architectural Decisions
+
+1. **Token-level compression over LLM extraction** — eliminates per-call API cost
+2. **4-signal hybrid retrieval** — dominant quality factor (~20pt improvement over single-signal)
+3. **Local-only default** — all core ops offline; LLM extraction is opt-in
+4. **Single storage backend** — USearch HNSW replaces complex multi-backend abstractions
+5. **Entity graph for multi-hop** — enables relationship-based retrieval beyond keywords
+6. **Raw text for BM25** — keyword search on uncompressed text for better recall
+7. **Soft deletion** — avoids expensive full index rebuilds
+8. **Adaptive compression** — short texts bypass compression to preserve every word
+9. **Deterministic default** — same input always produces same memory (LLMLingua-2 mode)
+10. **Auto-persistence** — Memory API removes manual save/load burden
+
+---
+
+## Class & Method Index
+
+| Module | Class/Function | Purpose |
+|--------|---------------|---------|
+| fraction.client | Memory | High-level auto-persistence wrapper |
+| fraction.memory | Fraction | Core memory engine |
+| fraction.config | FractionConfig | All configuration options |
+| fraction.types | CompressedFragment, MemoryItem, SearchResult, MemoryEvent | Data models |
+| fraction.compressor | LLMLingua2Scorer | Default token compression |
+| fraction.compressor | SelfInfoScorer | GPT-2 self-information scorer |
+| fraction.compressor | EnsembleScorer | Weighted multi-scorer combination |
+| fraction.compressor | LLMExtractorScorer | litellm-based fact extraction |
+| fraction.compressor | build_compressor() | Factory function |
+| fraction.embedder | SentenceTransformerEmbedder | BGE-base 768-dim embeddings |
+| fraction.entity | EntityExtractor | spaCy NER + relationship triples |
+| fraction.vector_store | USearchVectorStore | HNSW index + metadata |
+| fraction.graph | EntityGraph | In-memory entity graph with JSON persistence |
+| fraction.retriever | HybridRetriever | 4-signal RRF retrieval |
+| fraction.storage | SQLiteHistory | Audit log via SQLAlchemy |
+| fraction.utils | generate_id, content_hash, now_utc, format_messages | Helpers |
+| benchmarks.metrics | calculate_bleu1, calculate_f1, llm_judge, binary_llm_judge | Evaluation |
+| benchmarks.locomo | run_fraction_benchmark, build_report, generate_markdown_report | Benchmark runner |
+| benchmarks.prompts | ANSWER_PROMPT, LLM_JUDGE_PROMPT, BINARY_JUDGE_PROMPT | Prompt templates |
