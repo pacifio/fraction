@@ -1,6 +1,8 @@
 # Fraction
 
-Persistent memory layer for LLM agents and AI applications. Zero API costs, sub-100ms ingestion, fully offline.
+Persistent memory layer for LLM agents and AI applications. **3x faster** than LLM-based extraction — zero API costs, sub-100ms ingestion, fully offline.
+
+Outperforms **mem0** on BLEU-1 (+17%), F1 (+10%), and LLM Judge (+14%). Outperforms **supermemory** on BLEU-1 (+8%) and LLM Judge (+5%). All with **zero LLM calls** and **1.6x faster ingestion** than mem0.
 
 Fraction supports two extraction modes:
 - **LLMLingua-2** (default) — learned token compression, zero API cost, fully offline
