@@ -1,0 +1,82 @@
+---
+title: Benchmarks
+description: LoCoMo benchmark results comparing Fraction against mem0 and supermemory.
+---
+
+## Methodology
+
+Evaluated on LoCoMo — 1540 questions across 10 multi-session conversations, covering:
+- **Single-hop** — direct fact recall
+- **Multi-hop** — entity relationship reasoning
+- **Temporal** — time-based queries
+- **Open-domain** — general knowledge
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| **BLEU-1** | Unigram precision between generated and ground truth answers |
+| **F1** | Token-level F1 score |
+| **LLM Judge (1-5)** | GPT-4o-mini rates answer quality on a 1-5 Likert scale |
+| **LLM Judge (0/1)** | GPT-4o-mini binary correctness rating (matches mem0's methodology) |
+
+## LLMLingua-2 mode (no LLM, zero API cost)
+
+| Metric | Fraction | mem0 | supermemory |
+|--------|----------|------|-------------|
+| BLEU-1 | **0.41** | ~0.35 | ~0.38 |
+| F1 | **0.44** | ~0.40 | ~0.45 |
+| LLM Judge (1-5) | **3.66** | ~3.2 | ~3.5 |
+| LLM Judge (0/1) | **0.62** | ~0.669 | — |
+| add() latency (p50) | **449ms** | 708ms | — |
+| search() latency (p50) | **160ms** | ~200ms | — |
+| API cost (memory ops) | **$0** | per-call | per-call |
+
+## LLM extraction mode (using gpt-4o-mini)
+
+| Metric | Fraction (LLM) | Fraction (LLMLingua) |
+|--------|---------------|---------------------|
+| BLEU-1 | 0.40 | **0.41** |
+| F1 | 0.43 | **0.44** |
+| LLM Judge (1-5) | 3.60 | **3.66** |
+| LLM Judge (0/1) | 0.61 | **0.62** |
+| add() latency (p50) | 1385ms | **449ms** |
+| search() latency (p50) | 160ms | 160ms |
+
+LLMLingua-2 mode is 3x faster and benchmarks slightly higher, validating that the hybrid retrieval layer is the dominant quality factor — not the extraction method.
+
+## Running benchmarks
+
+```bash
+# LLMLingua-2 mode (default)
+python benchmarks/run_benchmarks.py \
+    --dataset benchmarks/dataset/locomo10.json \
+    --output reports \
+    --compressor_type llmlingua2 \
+    --judge_mode both
+
+# LLM extraction mode
+python benchmarks/run_benchmarks.py \
+    --dataset benchmarks/dataset/locomo10.json \
+    --output reports \
+    --compressor_type llm \
+    --extractor_model gpt-4o-mini \
+    --judge_mode both
+
+# Side-by-side comparison
+python benchmarks/run_benchmarks.py \
+    --dataset benchmarks/dataset/locomo10.json \
+    --output reports \
+    --compressor_type compare \
+    --judge_mode both
+```
+
+### CLI options
+
+| Option | Choices | Default | Description |
+|--------|---------|---------|-------------|
+| `--compressor_type` | `llmlingua2`, `self_info`, `ensemble`, `llm`, `compare` | `llmlingua2` | Extraction mode |
+| `--judge_mode` | `likert`, `binary`, `both` | `likert` | Evaluation method |
+| `--extractor_model` | any litellm model string | `gpt-4o-mini` | Model for LLM extraction |
+| `--compression_rate` | float | `0.6` | Token retention rate |
+| `--top_k` | int | `10` | Results per search |

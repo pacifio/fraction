@@ -1,0 +1,201 @@
+---
+title: "Memory API"
+description: High-level Memory class with automatic persistence.
+---
+
+The `Memory` class is the recommended way to use Fraction. It wraps the low-level `Fraction` engine with automatic persistence — every write is saved to disk immediately.
+
+## Constructor
+
+```python title="Creating a Memory instance"
+from fraction import Memory, FractionConfig
+
+# Default storage: ~/.fraction/
+m = Memory()
+
+# Custom storage directory
+m = Memory(data_dir="./my_project_memory")
+
+# With custom config
+m = Memory(config=FractionConfig(compression_rate=0.5, top_k=5))
+
+# With LLM-based extraction
+m = Memory(config=FractionConfig(
+    compressor_type="llm",
+    llm_model="gpt-4o-mini",
+))
+
+# Disable auto-save for batch operations
+m = Memory(auto_save=False)
+```
+
+```python title="Constructor signature"
+Memory(
+    data_dir: str = "~/.fraction/",    # directory for persisted data
+    config: FractionConfig = FractionConfig(),  # see Configuration page
+    auto_save: bool = True,            # save after every write operation
+)
+```
+
+## Write operations
+
+### add()
+
+Add a memory from text or conversation messages.
+
+```python title="add() examples"
+# From text
+result = m.add("I moved to Berlin in 2023.", user_id="alice")
+
+# From conversation messages
+result = m.add([
+    {"role": "user", "content": "I just got a golden retriever!"},
+    {"role": "assistant", "content": "That's great! What's their name?"},
+    {"role": "user", "content": "His name is Oliver."},
+], user_id="alice")
+
+# With metadata
+result = m.add("Loves hiking", user_id="alice", metadata={"source": "onboarding"})
+```
+
+```python title="add() signature"
+m.add(
+    messages: str | list[str] | list[dict],  # text or conversation messages
+    user_id: str | None = None,              # scope to a specific user
+    agent_id: str | None = None,             # scope to a specific agent
+    run_id: str | None = None,               # scope to a specific run
+    metadata: dict | None = None,            # custom metadata
+) -> dict
+```
+
+```python title="add() return value"
+{
+    "results": [
+        {
+            "id": "a1b2c3d4e5f6g7h8",              # 16-char hex identifier
+            "memory": "moved Berlin 2023.",          # compressed text
+            "event": "ADD",                          # ADD | UPDATE | NOOP | SKIP
+            "entities": ["Berlin"],                  # spaCy NER entities
+            "compression_ratio": 0.6,                # 0.6 = kept 60% of tokens
+        }
+    ],
+    "latency_ms": 85.2,
+}
+# event types:
+#   ADD    — new memory created
+#   UPDATE — existing memory updated (cosine > 0.95)
+#   NOOP   — no change needed
+#   SKIP   — filtered by relevance gate (filler text)
+```
+
+### update()
+
+Update an existing memory by ID. Re-compresses, re-embeds, and re-extracts entities.
+
+```python title="update()"
+m.update(memory_id, "I moved to Munich in 2024.")
+```
+
+### delete()
+
+Delete a specific memory (soft-delete from vector index, cascade-cleans entity graph).
+
+```python title="delete()"
+m.delete(memory_id)
+```
+
+### delete_all()
+
+Delete all memories matching a scope.
+
+```python title="delete_all()"
+m.delete_all(user_id="alice")
+```
+
+## Read operations
+
+### search()
+
+Search memories using hybrid retrieval (vector + BM25 + entity graph + temporal boost).
+
+```python title="search() example"
+results = m.search("where does alice live?", user_id="alice", limit=5)
+
+for r in results["results"]:
+    print(f"{r['memory']} (score: {r['score']:.3f})")
+```
+
+```python title="search() signature"
+m.search(
+    query: str,                          # triggers hybrid retrieval across 4 signals
+    user_id: str | None = None,          # filter by user
+    agent_id: str | None = None,         # filter by agent
+    run_id: str | None = None,           # filter by run
+    limit: int = config.top_k,           # max results (default: 10)
+) -> dict
+```
+
+```python title="search() return value"
+{
+    "results": [
+        {
+            "id": "a1b2c3d4e5f6g7h8",
+            "memory": "moved Berlin 2023.",
+            "score": 0.847,                            # RRF fusion of 4 signals:
+                                                       #   vector  (cosine, weight 1.0)
+                                                       #   bm25    (keywords, weight 1.2)
+                                                       #   graph   (entity hops, weight 0.8)
+                                                       #   temporal (date-aware, weight 1.0)
+            "metadata": {"source": "onboarding"},
+            "created_at": "2024-01-15T10:30:00Z",
+        }
+    ],
+    "latency_ms": 12.5,
+}
+```
+
+### get()
+
+Get a specific memory by ID.
+
+```python title="get()"
+memory = m.get(memory_id)
+```
+
+### get_all()
+
+List all memories, optionally filtered by scope.
+
+```python title="get_all()"
+all_memories = m.get_all(user_id="alice")
+```
+
+### history()
+
+View the change history for a memory (add, update, delete events).
+
+```python title="history()"
+events = m.history(memory_id)
+```
+
+```python title="history() return value"
+[
+    {
+        "id": "evt_abc123",
+        "memory_id": "a1b2c3d4e5f6g7h8",
+        "event": "ADD",              # ADD | UPDATE | DELETE
+        "old_content": None,         # previous content (None for ADD)
+        "new_content": "moved Berlin 2023.",  # new content (None for DELETE)
+        "user_id": "alice",
+        "timestamp": "2024-01-15T10:30:00Z",
+    }
+]
+```
+
+## Context manager
+
+```python title="Context manager usage"
+with Memory(data_dir="./temp") as m:
+    m.add("some fact", user_id="u1")
+    # save() called automatically on exit
+```

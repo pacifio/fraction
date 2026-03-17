@@ -1,0 +1,136 @@
+---
+title: Quick Start
+description: Get up and running with Fraction in under a minute.
+---
+
+## Install
+
+```bash
+pip install fractionally
+python -m spacy download en_core_web_sm
+```
+
+## Basic usage
+
+```python title="main.py"
+from fraction import Memory
+
+# Create a memory instance — data persists to ~/.fraction/ by default
+m = Memory()
+
+# Add memories — each one is compressed, embedded, and indexed automatically
+m.add("I love hiking in the Rocky Mountains.", user_id="alice")
+m.add("My favorite book is Dune by Frank Herbert.", user_id="alice")
+m.add("I'm allergic to peanuts.", user_id="alice")
+
+# Search using hybrid retrieval (vector + BM25 + entity graph + temporal)
+results = m.search("outdoor activities", user_id="alice")
+for r in results["results"]:
+    print(f"{r['memory']} (score: {r['score']:.3f})")
+# => "love hiking Rocky Mountains." (score: 0.847)
+```
+
+### What happens when you call `add()`
+
+Every call to `add()` returns a result dict showing exactly what happened:
+
+```python title="Return type of add()"
+# add() returns a dict with this shape:
+{
+    "results": [
+        {
+            "id": "a1b2c3d4e5f6g7h8",       # 16-char hex unique identifier
+            "memory": "love hiking Rocky Mountains.",  # compressed text (tokens reduced to 60%)
+            "event": "ADD",                   # ADD | UPDATE | NOOP | SKIP
+            "entities": ["Rocky Mountains"],  # named entities extracted via spaCy NER
+            "compression_ratio": 0.6,         # how much text was compressed (0.6 = kept 60%)
+        }
+    ],
+    "latency_ms": 85.2,                      # total wall-clock time in milliseconds
+}
+```
+
+### What happens when you call `search()`
+
+```python title="Return type of search()"
+# search() returns a dict with this shape:
+{
+    "results": [
+        {
+            "id": "a1b2c3d4e5f6g7h8",                # memory identifier
+            "memory": "love hiking Rocky Mountains.",  # the stored memory text
+            "score": 0.847,                            # relevance score from hybrid retrieval (0-1)
+            "metadata": {"source": "onboarding"},      # any custom metadata you attached
+            "created_at": "2024-01-15T10:30:00Z",      # ISO timestamp of memory creation
+        }
+    ],
+    "latency_ms": 12.5,                               # query latency in milliseconds
+}
+
+# Hybrid retrieval combines 4 signals via Reciprocal Rank Fusion:
+#   - vector:   cosine similarity from USearch HNSW index  (weight: 1.0)
+#   - bm25:     BM25Okapi keyword relevance on raw text    (weight: 1.2)
+#   - graph:    entity graph traversal, up to 2 hops       (weight: 0.8)
+#   - temporal: date-aware scoring for time-based queries   (weight: 1.0)
+```
+
+## Conversation messages
+
+You can add full conversation turns — Fraction extracts facts from the entire exchange:
+
+```python title="conversations.py"
+m.add([
+    {"role": "user", "content": "I just got a golden retriever!"},
+    {"role": "assistant", "content": "That's great! What's their name?"},
+    {"role": "user", "content": "His name is Oliver."},
+], user_id="alice")
+
+# Now you can search for this:
+results = m.search("what pet does alice have?", user_id="alice")
+# => "got golden retriever name Oliver." (score: 0.812)
+```
+
+## Where data is stored
+
+By default, memories persist to `~/.fraction/`. You can customize this:
+
+```python title="custom_storage.py"
+m = Memory(data_dir="./my_project_memory")
+```
+
+Memories automatically persist after every write operation. When you create a new `Memory` instance pointing to the same directory, all previous memories are loaded automatically.
+
+## Using an LLM provider instead
+
+Swap the default LLMLingua-2 compression for any LLM via litellm:
+
+```python title="llm_mode.py"
+from fraction import Memory, FractionConfig
+
+# OpenAI
+m = Memory(config=FractionConfig(
+    compressor_type="llm",
+    llm_model="gpt-4o-mini",
+))
+
+# Anthropic
+m = Memory(config=FractionConfig(
+    compressor_type="llm",
+    llm_model="anthropic/claude-sonnet-4-20250514",
+))
+
+# Ollama (local)
+m = Memory(config=FractionConfig(
+    compressor_type="llm",
+    llm_model="ollama/llama3",
+    llm_api_base="http://localhost:11434",
+))
+```
+
+## Next steps
+
+<Cards>
+  <Card title="Memory API Reference" href="/docs/api-memory" />
+  <Card title="Configuration" href="/docs/configuration" />
+  <Card title="Extraction Modes" href="/docs/extraction-modes" />
+</Cards>

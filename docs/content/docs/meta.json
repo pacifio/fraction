@@ -1,0 +1,17 @@
+{
+  "pages": [
+    "---Getting Started---",
+    "index",
+    "quick-start",
+    "---API Reference---",
+    "api-memory",
+    "api-fraction",
+    "configuration",
+    "---Architecture---",
+    "how-it-works",
+    "extraction-modes",
+    "---Results---",
+    "benchmarks",
+    "changelog"
+  ]
+}

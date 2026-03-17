@@ -1,0 +1,119 @@
+---
+title: Extraction Modes
+description: "LLMLingua-2 (offline, free) vs LLM extraction (any provider via litellm)."
+---
+
+Fraction supports two extraction modes that determine how text is compressed before storage. Both modes feed into the same hybrid retrieval layer.
+
+## LLMLingua-2 (default)
+
+Token-level compression using a BERT-sized model (~110M params) distilled from GPT-4 compression decisions.
+
+```python
+from fraction import Memory, FractionConfig
+
+m = Memory(config=FractionConfig(
+    compressor_type="llmlingua2",
+    compression_rate=0.6,
+))
+```
+
+**Characteristics:**
+- **Latency:** 80-150ms per text
+- **Cost:** Free (runs locally)
+- **Deterministic:** Same input always produces the same output
+- **Token-level:** Scores individual token importance, retains top 60%
+- **Temporal preservation:** Automatically force-keeps date/time tokens
+
+**Adaptive compression** (enabled by default) scales the compression rate based on input length:
+
+| Input length | Effective rate |
+|-------------|---------------|
+| ≤20 tokens | 1.0 (no compression) |
+| 21-50 tokens | 0.85 |
+| 51-100 tokens | 0.7 |
+| >100 tokens | Configured rate (0.6) |
+
+## LLM extraction
+
+Fact-level extraction using any LLM provider via [litellm](https://github.com/BerriAI/litellm). Extracts structured JSON with facts and entities.
+
+```python
+m = Memory(config=FractionConfig(
+    compressor_type="llm",
+    llm_model="gpt-4o-mini",
+))
+```
+
+<Callout type="info">
+Install the LLM extra: `pip install fractionally[llm]`
+</Callout>
+
+**Characteristics:**
+- **Latency:** 500-2000ms per text (depends on provider)
+- **Cost:** Per-call API charges
+- **Non-deterministic:** LLM outputs may vary
+- **Fact-level:** Extracts structured facts and entities, not token scores
+
+### Provider examples
+
+**OpenAI:**
+
+```python
+FractionConfig(
+    compressor_type="llm",
+    llm_model="gpt-4o-mini",
+    # Uses OPENAI_API_KEY env var by default
+)
+```
+
+**Anthropic:**
+
+```python
+FractionConfig(
+    compressor_type="llm",
+    llm_model="anthropic/claude-sonnet-4-20250514",
+    # Uses ANTHROPIC_API_KEY env var by default
+)
+```
+
+**Ollama (local):**
+
+```python
+FractionConfig(
+    compressor_type="llm",
+    llm_model="ollama/llama3",
+    llm_api_base="http://localhost:11434",
+)
+```
+
+**Custom API key:**
+
+```python
+FractionConfig(
+    compressor_type="llm",
+    llm_model="gpt-4o-mini",
+    llm_api_key="sk-...",
+)
+```
+
+## Comparison
+
+| | LLMLingua-2 | LLM extraction |
+|--|-------------|----------------|
+| Latency | 80-150ms | 500-2000ms |
+| Cost | Free | Per-call |
+| Deterministic | Yes | No |
+| Granularity | Token-level | Fact-level |
+| Offline | Yes | Depends on provider |
+| Quality (BLEU-1) | 0.41 | 0.40 |
+| Quality (F1) | 0.44 | 0.43 |
+
+LLMLingua-2 is the default because it's faster, free, deterministic, and benchmarks slightly higher. LLM extraction is useful when you want structured fact output or are already using an LLM provider.
+
+## Other strategies
+
+Two additional strategies are available for advanced use:
+
+- **`self_info`** — Uses GPT-2 self-information scoring (I(x) = -log P(x|context)). Slower (200-400ms) but requires no fine-tuned model.
+- **`ensemble`** — Weighted combination of multiple scorers. Highest quality but slowest (300-500ms).

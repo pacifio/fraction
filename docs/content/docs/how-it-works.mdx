@@ -1,0 +1,89 @@
+---
+title: How It Works
+description: Architecture overview of Fraction's write and read paths.
+---
+
+Fraction uses a two-stage pipeline: **write** (ingestion) compresses and indexes memories, **read** (retrieval) combines four signals to find relevant memories.
+
+## Write path
+
+```
+text → compress → NER → relevance gate → embed → dedup → index + graph
+```
+
+### 1. Compress
+
+The input text is compressed using LLMLingua-2 (default) or an LLM extractor. LLMLingua-2 is a BERT-sized model (~110M params) that scores each token's importance and retains the top 60%. Adaptive compression skips this for very short texts (≤20 tokens).
+
+### 2. Extract entities
+
+spaCy NER extracts named entities (people, places, organizations) from the compressed text. No LLM calls needed.
+
+### 3. Relevance gate
+
+Filler turns with no entities and fewer than 3 content words (after removing stopwords like "ok", "yeah", "thanks") are automatically skipped.
+
+### 4. Embed
+
+Sentence-Transformers (BGE-base) generates a 768-dimensional vector from the compressed text. All local, no API calls.
+
+### 5. Deduplication check
+
+The new embedding is compared against existing memories. If cosine similarity exceeds 0.95, the existing memory is updated instead of creating a duplicate.
+
+### 6. Index and graph
+
+The embedding is stored in a USearch HNSW index. The raw (uncompressed) text is added to the BM25 corpus. Entities are added to the entity graph with co-occurrence edges and dependency-parsed relationship triples.
+
+### 7. Audit log
+
+An event (ADD or UPDATE) is recorded in the SQLite history database.
+
+## Read path
+
+```
+query → embed → vector + BM25 + graph + temporal → RRF → results
+```
+
+Four retrieval signals are computed independently, then merged via Reciprocal Rank Fusion:
+
+### 1. Vector search
+
+The query is embedded and compared against all stored memories using cosine similarity via USearch HNSW.
+
+### 2. BM25 keyword search
+
+The query is tokenized and scored against the raw text corpus using BM25Okapi. This catches exact keyword matches that semantic search might miss.
+
+### 3. Entity graph traversal
+
+Query entities are extracted via spaCy NER, matched to the entity graph (with fuzzy matching), and related memories are found via BFS up to 2 hops. Direct matches score 1.0, multi-hop matches score 1/(1+distance).
+
+### 4. Temporal boost
+
+Activated when the query matches temporal patterns ("when did", "what date", "last time", etc.). Memories containing exact matching dates score +2.0, while general temporal density adds a smaller boost.
+
+## Reciprocal Rank Fusion
+
+The four signal rankings are combined using RRF:
+
+```
+score(doc) = Σ(weight_i / (k + rank_i(doc)))
+```
+
+Default weights: vector 1.0, BM25 1.2, graph 0.8, temporal 1.0. The k parameter (default 30) controls how sharply top-ranked results are preferred.
+
+Results below `top_score * min_score_ratio` are filtered out, and duplicates are removed.
+
+## Persistence
+
+Each Fraction instance persists four files:
+
+| File | Contents |
+|------|----------|
+| USearch index (`.usearch`) | HNSW binary vector index |
+| Metadata JSON | Vector payloads, key mapping, deleted set |
+| Graph JSON | Entity nodes, edges, text-to-ID mapping |
+| SQLite database | Audit log of all ADD/UPDATE/DELETE events |
+
+The `Memory` class manages these paths automatically under `~/.fraction/` (or your custom `data_dir`).

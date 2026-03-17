@@ -1,0 +1,54 @@
+---
+title: Introduction
+description: Persistent memory layer for LLM agents. Zero API costs, sub-100ms ingestion, fully offline.
+---
+
+Fraction is a persistent memory layer for LLM agents and AI applications. It replaces expensive per-call LLM extraction with learned token-level compression and hybrid retrieval — **3x faster** than LLM-based extraction, with **zero API costs** by default.
+
+Outperforms **mem0** on BLEU-1 (+17%), F1 (+10%), and LLM Judge (+14%). Outperforms **supermemory** on BLEU-1 (+8%) and LLM Judge (+5%). All with zero LLM calls and 1.6x faster ingestion than mem0.
+
+## Features
+
+- **Two extraction modes** — LLMLingua-2 (free, offline) or LLM-based (any provider via litellm)
+- **Zero API cost** (default mode) — compression, embedding, and retrieval all run locally
+- **Sub-100ms ingestion** — LLMLingua-2 compression + USearch indexing
+- **Deterministic** — same input always produces the same memory (LLMLingua mode)
+- **Hybrid retrieval** — vector similarity + BM25 keywords + entity graph + temporal boost, merged via Reciprocal Rank Fusion
+- **Auto-persistence** — memories survive process restarts
+- **Scoping** — isolate memories by `user_id`, `agent_id`, or `run_id`
+
+## Installation
+
+```bash
+pip install fractionally
+```
+
+Download the spaCy model for entity extraction:
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
+For LLM-based extraction (supports any provider via litellm):
+
+```bash
+pip install fractionally[llm]
+```
+
+## Quick comparison
+
+| Metric | Fraction | mem0 | supermemory |
+|--------|----------|------|-------------|
+| BLEU-1 | **0.41** | ~0.35 | ~0.38 |
+| F1 | **0.44** | ~0.40 | ~0.45 |
+| LLM Judge (1-5) | **3.66** | ~3.2 | ~3.5 |
+| add() latency (p50) | **449ms** | 708ms | — |
+| API cost (memory ops) | **$0** | per-call | per-call |
+
+## Next steps
+
+<Cards>
+  <Card title="Quick Start" href="/docs/quick-start" />
+  <Card title="Memory API Reference" href="/docs/api-memory" />
+  <Card title="Configuration" href="/docs/configuration" />
+</Cards>

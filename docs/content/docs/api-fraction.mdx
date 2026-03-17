@@ -1,0 +1,80 @@
+---
+title: "Fraction API"
+description: Low-level Fraction class for manual control over persistence and the retrieval pipeline.
+---
+
+The `Fraction` class gives you direct access to the compression and retrieval pipeline. Use it when you need manual control over persistence (e.g., for benchmarks or batch processing).
+
+For most use cases, prefer the [Memory API](/docs/api-memory) which handles persistence automatically.
+
+## When to use Fraction vs Memory
+
+| | Memory | Fraction |
+|--|--------|----------|
+| Persistence | Automatic | Manual (`save()`/`load()`) |
+| Storage paths | Managed (`~/.fraction/`) | You configure paths |
+| Best for | Applications, agents | Benchmarks, custom pipelines |
+
+## Constructor
+
+```python
+from fraction import Fraction, FractionConfig
+
+config = FractionConfig(
+    vector_store_path="./my_index.usearch",
+    metadata_path="./my_meta.json",
+    history_db_path="./my_history.db",
+    compression_rate=0.6,
+)
+f = Fraction(config)
+```
+
+## Methods
+
+### add()
+
+Same interface as `Memory.add()`:
+
+```python
+result = f.add("I moved to Berlin in 2023.", user_id="alice")
+```
+
+### search()
+
+Same interface as `Memory.search()`:
+
+```python
+results = f.search("where does alice live?", user_id="alice")
+```
+
+### save() / load()
+
+Manually persist and restore state:
+
+```python
+f.save()   # writes index, metadata, graph to disk
+f.load()   # restores from disk, rebuilds BM25 corpus
+```
+
+### reset()
+
+Wipe all data and delete persisted files:
+
+```python
+f.reset()
+```
+
+### Other methods
+
+`get()`, `get_all()`, `update()`, `delete()`, `delete_all()`, and `history()` work identically to the [Memory API](/docs/api-memory).
+
+## Persisted files
+
+When you call `save()`, four files are created:
+
+| File | Description |
+|------|-------------|
+| `{vector_store_path}` | USearch HNSW binary index |
+| `{metadata_path}` | JSON with vector metadata, keys, and deleted set |
+| `{vector_store_path}_graph.json` | Entity graph nodes and edges |
+| `{history_db_path}` | SQLite audit log |

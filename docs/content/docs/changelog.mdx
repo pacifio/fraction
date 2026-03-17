@@ -1,0 +1,35 @@
+---
+title: Changelog
+description: Version history and release notes.
+---
+
+## v0.1.1
+
+### Added
+- LLM-based fact extraction mode (`compressor_type="llm"`) as alternative to LLMLingua-2
+- litellm integration — use any LLM provider (OpenAI, Anthropic, Ollama, etc.)
+- Binary LLM judge (0/1) matching mem0's evaluation methodology
+- Comparative benchmark mode (`--compressor_type compare`) for side-by-side results
+- `--judge_mode` flag: `likert`, `binary`, or `both`
+- `--extractor_model` flag for configurable LLM extraction model
+
+### Changed
+- Replaced direct OpenAI dependency with litellm for provider flexibility
+- Package renamed to `fractionally` on PyPI
+- Config fields: `llm_model`, `llm_api_key`, `llm_api_base`, `llm_extraction_prompt`
+
+## v0.1.0
+
+### Added
+- Core memory engine with LLMLingua-2 token compression
+- Hybrid retrieval: vector similarity + BM25 + entity graph + temporal boost
+- Reciprocal Rank Fusion with configurable weights
+- `Memory` (high-level) and `Fraction` (low-level) APIs
+- Auto-persistence to `~/.fraction/`
+- spaCy NER entity extraction with relationship triples
+- USearch HNSW vector store with soft deletion
+- SQLite audit log
+- Scoping by `user_id`, `agent_id`, `run_id`
+- LoCoMo benchmark suite with BLEU-1, F1, and LLM judge metrics
+- Adaptive compression for short texts
+- Relevance gate for filler turn filtering

@@ -1,0 +1,187 @@
+---
+title: Configuration
+description: Complete FractionConfig reference with all available options.
+---
+
+All configuration is done through `FractionConfig`. Pass it to `Memory` or `Fraction`:
+
+```python title="Usage"
+from fraction import Memory, FractionConfig
+
+config = FractionConfig(
+    compression_rate=0.5,
+    top_k=5,
+    compressor_type="llm",
+    llm_model="gpt-4o-mini",
+)
+m = Memory(config=config)
+```
+
+```python title="Full type definition"
+@dataclass
+class FractionConfig:
+    # --- Compression ---
+    compressor_type: str = "llmlingua2"   # "llmlingua2" | "self_info" | "ensemble" | "llm"
+    compression_rate: float = 0.6         # fraction of tokens to retain (0.6 = keep 60%)
+    adaptive_compression: bool = True     # skip compression for very short texts (≤20 tokens)
+    importance_threshold: float = 0.0
+
+    # --- LLM extraction (when compressor_type="llm") ---
+    llm_model: str = "gpt-4o-mini"       # any litellm model string
+    llm_api_key: str | None = None       # falls back to provider env vars (OPENAI_API_KEY, etc.)
+    llm_api_base: str | None = None      # custom base URL (for Ollama: "http://localhost:11434")
+    llm_extraction_prompt: str | None = None
+
+    # --- Relevance gate ---
+    relevance_gate: bool = True
+    min_content_words: int = 3
+
+    # --- Embedder ---
+    embedder_model: str = "BAAI/bge-base-en-v1.5"
+    embedding_dim: int = 768
+
+    # --- Retrieval ---
+    top_k: int = 10
+    use_bm25: bool = True
+    use_graph: bool = True
+    rerank: bool = True
+    duplicate_threshold: float = 0.95
+    min_score_ratio: float = 0.3
+
+    # --- RRF ---
+    rrf_k: int = 30
+    rrf_weights: dict | None = None      # default: {"vector": 1.0, "bm25": 1.2, ...}
+
+    # --- Storage ---
+    vector_store_path: str = "fraction_index.usearch"
+    metadata_path: str = "fraction_metadata.json"
+    history_db_path: str = "fraction_history.db"
+    default_user_id: str | None = None
+```
+
+## Compression
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `compressor_type` | `str` | `"llmlingua2"` | `"llmlingua2"`, `"self_info"`, `"ensemble"`, or `"llm"` |
+| `compression_rate` | `float` | `0.6` | Fraction of tokens to retain (0.6 = keep 60%) |
+| `adaptive_compression` | `bool` | `True` | Skip compression for very short texts |
+| `importance_threshold` | `float` | `0.0` | Minimum token importance score to retain |
+
+## LLM extraction
+
+Used when `compressor_type="llm"`. Powered by [litellm](https://github.com/BerriAI/litellm) — supports any provider.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `llm_model` | `str` | `"gpt-4o-mini"` | Any litellm model string |
+| `llm_api_key` | `str \| None` | `None` | API key (falls back to provider env vars) |
+| `llm_api_base` | `str \| None` | `None` | Custom API base URL (for Ollama, self-hosted) |
+| `llm_extraction_prompt` | `str \| None` | `None` | Custom extraction prompt |
+
+**Provider examples:**
+
+```python
+# OpenAI
+FractionConfig(compressor_type="llm", llm_model="gpt-4o-mini")
+
+# Anthropic
+FractionConfig(compressor_type="llm", llm_model="anthropic/claude-sonnet-4-20250514")
+
+# Ollama (local)
+FractionConfig(
+    compressor_type="llm",
+    llm_model="ollama/llama3",
+    llm_api_base="http://localhost:11434",
+)
+```
+
+## Relevance gate
+
+Filters out filler turns with no useful content.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `relevance_gate` | `bool` | `True` | Enable filler turn filtering |
+| `min_content_words` | `int` | `3` | Minimum non-stopword count to store |
+
+## Embedder
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `embedder_model` | `str` | `"BAAI/bge-base-en-v1.5"` | Sentence-Transformers model |
+| `embedding_dim` | `int` | `768` | Embedding dimension (auto-detected) |
+
+## Vector store
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `vector_store_path` | `str` | `"fraction_index.usearch"` | Path for USearch index file |
+| `metadata_path` | `str` | `"fraction_metadata.json"` | Path for metadata JSON |
+| `metric` | `str` | `"cos"` | Distance metric (`"cos"`, `"l2"`, `"ip"`) |
+| `dtype` | `str` | `"f32"` | Vector dtype |
+
+## Retrieval
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `top_k` | `int` | `10` | Default number of results per search |
+| `use_bm25` | `bool` | `True` | Enable BM25 keyword search |
+| `use_graph` | `bool` | `True` | Enable entity graph traversal |
+| `rerank` | `bool` | `True` | Enable RRF reranking |
+| `duplicate_threshold` | `float` | `0.95` | Cosine similarity threshold for deduplication |
+| `min_score_ratio` | `float` | `0.3` | Drop results below `top_score * ratio` |
+
+## Reciprocal Rank Fusion
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `rrf_k` | `int` | `30` | RRF smoothing parameter (lower = sharper top-rank preference) |
+| `rrf_weights` | `dict \| None` | `None` | Per-signal weights. Default: `{"vector": 1.0, "bm25": 1.2, "graph": 0.8, "temporal": 1.0}` |
+
+## Entity graph
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `entity_similarity_threshold` | `float` | `0.7` | Threshold for fuzzy entity matching |
+
+## Storage
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `history_db_path` | `str` | `"fraction_history.db"` | SQLite audit log path |
+| `default_user_id` | `str \| None` | `None` | Default user ID for all operations |
+
+## Full defaults
+
+```python
+FractionConfig(
+    compressor_type="llmlingua2",
+    compression_rate=0.6,
+    adaptive_compression=True,
+    importance_threshold=0.0,
+    llm_model="gpt-4o-mini",
+    llm_api_key=None,
+    llm_api_base=None,
+    llm_extraction_prompt=None,
+    relevance_gate=True,
+    min_content_words=3,
+    embedder_model="BAAI/bge-base-en-v1.5",
+    embedding_dim=768,
+    vector_store_path="fraction_index.usearch",
+    metadata_path="fraction_metadata.json",
+    metric="cos",
+    dtype="f32",
+    top_k=10,
+    use_bm25=True,
+    use_graph=True,
+    rerank=True,
+    duplicate_threshold=0.95,
+    min_score_ratio=0.3,
+    rrf_k=30,
+    rrf_weights=None,
+    entity_similarity_threshold=0.7,
+    history_db_path="fraction_history.db",
+    default_user_id=None,
+)
+```
