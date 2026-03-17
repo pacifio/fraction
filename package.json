@@ -1,0 +1,31 @@
+{
+  "name": "fraction-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "bun run --filter './packages/*' build",
+    "check": "bun run --filter './packages/*' check",
+    "lint": "bun run build && bun run lint:ox",
+    "lint:ox": "bun run lint:ox:fraction && bun run lint:ox:vercel-ai && bun run lint:ox:tanstack-ai && bun run lint:ox:benchmarks",
+    "lint:ox:fraction": "bun x oxlint -c .oxlintrc.json --tsconfig packages/fraction/tsconfig.oxc.json packages/fraction",
+    "lint:ox:vercel-ai": "bun x oxlint -c .oxlintrc.json --tsconfig packages/vercel-ai/tsconfig.oxc.json packages/vercel-ai",
+    "lint:ox:tanstack-ai": "bun x oxlint -c .oxlintrc.json --tsconfig packages/tanstack-ai/tsconfig.oxc.json packages/tanstack-ai",
+    "lint:ox:benchmarks": "bun x oxlint -c .oxlintrc.json --tsconfig tsconfig.oxc.json benchmarks",
+    "lint:fix": "bun run build && bun x oxlint -c .oxlintrc.json --fix --tsconfig packages/fraction/tsconfig.oxc.json packages/fraction && bun x oxlint -c .oxlintrc.json --fix --tsconfig packages/vercel-ai/tsconfig.oxc.json packages/vercel-ai && bun x oxlint -c .oxlintrc.json --fix --tsconfig packages/tanstack-ai/tsconfig.oxc.json packages/tanstack-ai && bun x oxlint -c .oxlintrc.json --fix --tsconfig tsconfig.oxc.json benchmarks",
+    "fmt": "bun x oxfmt -c .oxfmtrc.json --write packages benchmarks package.json tsconfig.json tsconfig.base.json tsconfig.oxc.json tsconfig.oxc.base.json .oxlintrc.json .oxfmtrc.json",
+    "fmt:check": "bun x oxfmt -c .oxfmtrc.json --check packages benchmarks package.json tsconfig.json tsconfig.base.json tsconfig.oxc.json tsconfig.oxc.base.json .oxlintrc.json .oxfmtrc.json",
+    "test": "bun run --filter './packages/*' test",
+    "benchmark:sdk": "bun benchmarks/bun-sdk-benchmark.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.8",
+    "oxfmt": "^0.41.0",
+    "oxlint": "^1.56.0",
+    "oxlint-tsgolint": "^0.17.0",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "bun@1.3.5"
+}

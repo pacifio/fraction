@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../../packages",
+    "tsBuildInfoFile": "./vercel-ai.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "../fraction/src/**/*.ts"]
+}

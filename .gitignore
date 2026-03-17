@@ -243,3 +243,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.plan
+node_modules/
+packages/*/dist/
+packages/*/*.tsbuildinfo
+.benchmark-fraction/
+packages/*/.tmp-fraction*
