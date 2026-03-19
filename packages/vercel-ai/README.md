@@ -15,6 +15,9 @@ bun add @fraction/vercel-ai fraction ai
 - `remember(options)`
 - `recall(options)`
 - `formatFractionContext(options)`
+- `createVercelEmbeddingProvider(options)`
+- `createVercelExtractionProvider(options)`
+- `createVercelCompressionProvider(options)`
 
 ## Example
 

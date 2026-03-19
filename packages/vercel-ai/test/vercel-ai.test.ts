@@ -6,6 +6,7 @@ import { join } from "node:path"
 import { Fraction } from "fraction"
 
 import {
+  createVercelCompressionProvider,
   createVercelEmbeddingProvider,
   createVercelExtractionProvider,
   fractionTools
@@ -31,7 +32,11 @@ describe("@fraction/vercel-ai", () => {
     const filename = join(process.cwd(), `.tmp-fraction-vercel-${Date.now()}.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Fraction.open({ filename, defaultNamespace: "test" })
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
     openClients.push(memory)
 
     const tools = fractionTools({ memory, scope: { namespace: "test" } })
@@ -50,7 +55,7 @@ describe("@fraction/vercel-ai", () => {
     expect(search?.results[0]?.content.includes("Bun")).toBeTrue()
   })
 
-  test("creates AI SDK embedding and extraction providers", async () => {
+  test("creates AI SDK embedding, extraction, and compression providers", async () => {
     const embeddingModel = {
       specificationVersion: "v3",
       provider: "test",
@@ -94,15 +99,51 @@ describe("@fraction/vercel-ai", () => {
       }
     } as unknown as LanguageModelV3
 
+    const compressionLanguageModel = {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "lm-compress-test",
+      supportedUrls: {},
+      doGenerate: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              content: "Sam uses the Vercel provider factory.",
+              retainedRatio: 0.5,
+              tokenCountBefore: 10,
+              tokenCountAfter: 5
+            })
+          }
+        ],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 1, text: 1, reasoning: 0 }
+        },
+        warnings: [],
+        response: { timestamp: new Date(), modelId: "lm-compress-test" }
+      }),
+      doStream: async () => {
+        throw new Error("doStream not implemented in test")
+      }
+    } as unknown as LanguageModelV3
+
     const embeddingProvider = createVercelEmbeddingProvider({ model: embeddingModel })
     const extractionProvider = createVercelExtractionProvider({ model: languageModel })
+    const compressionProvider = createVercelCompressionProvider({ model: compressionLanguageModel })
 
     const embeddings = await embeddingProvider.embedMany?.(["alpha", "beta"])
     const extracted = await extractionProvider.extract("Sam uses the Vercel provider factory.")
+    const compressed = await compressionProvider.compress(
+      "Sam uses the Vercel provider factory for memory compression."
+    )
 
     expect(embeddings?.length).toBe(2)
     expect(embeddings?.[0]?.[0]).toBe(5)
     expect(extracted.content).toBe("Sam uses the Vercel provider factory.")
     expect(extracted.entities.includes("Vercel")).toBeTrue()
+    expect(compressed.content).toBe("Sam uses the Vercel provider factory.")
+    expect(compressed.mode).toBe("provider")
   })
 })

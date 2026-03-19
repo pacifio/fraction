@@ -9,6 +9,7 @@ Effect-first local memory SDK for Bun.
 - Promise-friendly `Memory` / `Fraction` client API
 - Hybrid recall with lexical, vector, entity, and temporal scoring
 - Metadata-schema validation with Effect `Schema`
+- Local-first compression with built-in LLMLingua-2 hooks and heuristic fallback
 
 ## Install
 
@@ -33,6 +34,49 @@ console.log(results[0]?.memory.content)
 
 await memory.close()
 ```
+
+## Compression
+
+```ts
+import { Memory } from "fraction"
+
+const memory = await Memory.open({
+  filename: ".fraction/app.sqlite",
+  defaultNamespace: "app",
+  llmlingua: {
+    artifactBaseUrl:
+      "https://raw.githubusercontent.com/your-org/your-model-repo/main/llmlingua-2-bert-base-multilingual-cased-meetingbank-onnx"
+  }
+})
+
+await memory.add("Rina prefers concise technical answers and weekly planning summaries.")
+await memory.close()
+```
+
+Helpful exports:
+
+- `createLlmlingua2CompressionProvider(...)`
+- `createLlmlingua2Compressor(...)`
+- `prefetchLlmlinguaModel(...)`
+- `createHeuristicCompressionProvider(...)`
+
+To automate the Fraction-owned ONNX export and publish flow:
+
+```bash
+cd packages/fraction
+bun run convert:llmlingua
+bun run validate:llmlingua
+export FRACTION_LLMLINGUA_ARTIFACT_DIR=/absolute/path/to/your/cloned-model-repo/llmlingua-2-bert-base-multilingual-cased-meetingbank-onnx
+bun run release:llmlingua --skip-convert --skip-validate
+```
+
+Useful environment variables:
+
+- `FRACTION_LLMLINGUA_SOURCE_MODEL`
+- `FRACTION_LLMLINGUA_OUTPUT_DIR`
+- `FRACTION_LLMLINGUA_ARTIFACT_BASE_URL`
+- `FRACTION_LLMLINGUA_ARTIFACT_DIR`
+- `FRACTION_LLMLINGUA_VENV_DIR`
 
 ## Effect Runtime Usage
 

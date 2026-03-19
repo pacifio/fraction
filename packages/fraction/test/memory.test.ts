@@ -5,6 +5,13 @@ import { Schema } from "effect"
 
 import { Memory } from "../src/index"
 
+const baseOptions = (filename: string) =>
+  ({
+    filename,
+    defaultNamespace: "test",
+    compressorType: "heuristic" as const
+  }) as const
+
 const openClients: Array<{ close: () => Promise<void> }> = []
 const createdPaths = new Set<string>()
 
@@ -25,7 +32,7 @@ describe("Memory", () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Memory.open({ filename, defaultNamespace: "test" })
+    const memory = await Memory.open(baseOptions(filename))
     openClients.push(memory)
 
     const record = await memory.add("Alice is planning a trip to Tokyo next Tuesday.")
@@ -51,7 +58,7 @@ describe("Memory", () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-delete.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Memory.open({ filename, defaultNamespace: "test" })
+    const memory = await Memory.open(baseOptions(filename))
     openClients.push(memory)
 
     await memory.add("Alice likes coffee.", { namespace: "alpha" })
@@ -70,8 +77,7 @@ describe("Memory", () => {
     createdPaths.add(filename)
 
     const memory = await Memory.open({
-      filename,
-      defaultNamespace: "test",
+      ...baseOptions(filename),
       metadataSchema: Schema.Struct({
         category: Schema.String,
         priority: Schema.Number
@@ -108,8 +114,7 @@ describe("Memory", () => {
       Float32Array.from([text.length, Math.max(1, text.length % 7), 1, 0])
 
     const memory = await Memory.open({
-      filename,
-      defaultNamespace: "test",
+      ...baseOptions(filename),
       embeddingProvider: {
         embed: (text) => {
           singleCalls += 1
@@ -139,8 +144,7 @@ describe("Memory", () => {
     createdPaths.add(filename)
 
     const memory = await Memory.open({
-      filename,
-      defaultNamespace: "test",
+      ...baseOptions(filename),
       extractionProvider: {
         extract: (text) => ({
           content: `fact: ${text.split(".")[0]!.trim()}`,
@@ -163,7 +167,11 @@ describe("Memory", () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-cluster.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Memory.open({ filename, defaultNamespace: "ops" })
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "ops",
+      compressorType: "heuristic"
+    })
     openClients.push(memory)
 
     const kickoff = await memory.add(
@@ -200,7 +208,11 @@ describe("Memory", () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-versions.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Memory.open({ filename, defaultNamespace: "ops" })
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "ops",
+      compressorType: "heuristic"
+    })
     openClients.push(memory)
 
     const original = await memory.add("Project Atlas launch is in Tokyo on March 20, 2026.", {
@@ -241,5 +253,123 @@ describe("Memory", () => {
     expect(
       allRecords.some((record) => record.id === updated.id && record.isLatest === true)
     ).toBeTrue()
+  })
+
+  test("falls back to heuristic compression when llmlingua is unavailable", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-llml-fallback.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "llmlingua2",
+      llmlingua: {
+        model: "fraction/non-existent-llmlingua-model",
+        onUnavailable: "fallback-heuristic"
+      }
+    })
+    openClients.push(memory)
+
+    const rawText =
+      "Avery is coordinating the quarterly planning review with Jordan and Priya in Singapore next Tuesday. The final agenda includes a finance checkpoint. The travel logistics review needs hotel confirmations. Jordan also needs to circulate the updated board memo before the meeting."
+    const record = await memory.add(rawText)
+
+    expect(record.content.length).toBeGreaterThan(0)
+    expect(record.content.length).toBeLessThan(rawText.length)
+  })
+
+  test("errors when llmlingua is unavailable and fallback is disabled", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-llml-error.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "llmlingua2",
+      llmlingua: {
+        model: "fraction/non-existent-llmlingua-model",
+        onUnavailable: "error"
+      }
+    })
+    openClients.push(memory)
+
+    let didThrow = false
+    try {
+      await memory.add(
+        "The operations review for Fraction is scheduled with Maya, Ravi, and Ken next Thursday, and they need to finalize the Singapore travel plan before finance approval."
+      )
+    } catch {
+      didThrow = true
+    }
+
+    expect(didThrow).toBeTrue()
+  })
+
+  test("uses a custom compression provider ahead of local llmlingua", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-compression-provider.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "test",
+      adaptiveCompression: false,
+      compressionProvider: {
+        compress: (text) => ({
+          content: `compressed: ${text.split(".")[0]!.trim()}`,
+          mode: "provider",
+          source: "remote"
+        })
+      }
+    })
+    openClients.push(memory)
+
+    const record = await memory.add("Mina owns the Fraction release checklist. She also coordinates QA.")
+    expect(record.content).toBe("compressed: Mina owns the Fraction release checklist")
+  })
+
+  test("batches compression through compressMany when a provider exposes it", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-compression-batch.sqlite`)
+    createdPaths.add(filename)
+
+    const batchCalls: Array<ReadonlyArray<string>> = []
+    let singleCalls = 0
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "test",
+      adaptiveCompression: false,
+      compressionProvider: {
+        compress: (text) => {
+          singleCalls += 1
+          return {
+            content: text.toUpperCase(),
+            mode: "provider",
+            source: "remote"
+          }
+        },
+        compressMany: (texts) => {
+          batchCalls.push(texts)
+          return texts.map((text) => ({
+            content: text.toUpperCase(),
+            mode: "provider" as const,
+            source: "remote" as const
+          }))
+        }
+      }
+    })
+    openClients.push(memory)
+
+    const records = await memory.addMany(
+      [
+        "Mina coordinates the release notes and changelog.",
+        "Ravi validates the staging deployment checklist."
+      ],
+      { namespace: "test" }
+    )
+
+    expect(records.length).toBe(2)
+    expect(batchCalls.length).toBe(1)
+    expect(batchCalls[0]?.length).toBe(2)
+    expect(singleCalls).toBe(0)
   })
 })

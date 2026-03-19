@@ -23,6 +23,23 @@ export class ExtractionError extends Schema.TaggedErrorClass<ExtractionError>()(
   cause: Schema.optional(Schema.Defect)
 }) {}
 
+export class CompressionError extends Schema.TaggedErrorClass<CompressionError>()(
+  "CompressionError",
+  {
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect)
+  }
+) {}
+
+export class CompressionUnavailable extends Schema.TaggedErrorClass<CompressionUnavailable>()(
+  "CompressionUnavailable",
+  {
+    message: Schema.String,
+    model: Schema.optional(Schema.String),
+    cause: Schema.optional(Schema.Defect)
+  }
+) {}
+
 export class EmbeddingError extends Schema.TaggedErrorClass<EmbeddingError>()("EmbeddingError", {
   message: Schema.String,
   cause: Schema.optional(Schema.Defect)

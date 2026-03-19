@@ -12,6 +12,8 @@ import {
 import * as SqlClient from "effect/unstable/sql/SqlClient"
 
 import {
+  CompressionError,
+  CompressionUnavailable,
   EmbeddingError,
   ExtractionError,
   InvalidScope,
@@ -22,6 +24,7 @@ import {
 } from "./errors"
 import { DEFAULT_CONFIG, FractionConfigSchema } from "./types"
 import type {
+  CompressionResult,
   ExtractionResult,
   FilterExpr,
   FractionConfig,
@@ -34,7 +37,6 @@ import type {
   SearchResult
 } from "./types"
 import {
-  compressText,
   cosineSimilarity,
   decodeVector,
   embedTextLocal,
@@ -53,6 +55,10 @@ import {
   rrfScore,
   scopeToJson
 } from "./utils"
+import {
+  createHeuristicCompressionProvider,
+  createLlmlingua2CompressionProvider
+} from "./providers"
 
 export class FractionConfigRef extends ServiceMap.Service<FractionConfigRef, FractionConfig>()(
   "fraction/FractionConfig"
@@ -709,12 +715,205 @@ export class MemoryRepo extends ServiceMap.Service<
   )
 }
 
+interface CompressTextRequest extends Request.Request<CompressionResult, CompressionError> {
+  readonly _tag: "fraction/CompressTextRequest"
+  readonly text: string
+}
+
+const CompressTextRequest = Request.tagged<CompressTextRequest>("fraction/CompressTextRequest")
+
 interface EmbedTextRequest extends Request.Request<Float32Array, EmbeddingError> {
   readonly _tag: "fraction/EmbedTextRequest"
   readonly text: string
 }
 
 const EmbedTextRequest = Request.tagged<EmbedTextRequest>("fraction/EmbedTextRequest")
+
+export class CompressionService extends ServiceMap.Service<
+  CompressionService,
+  {
+    readonly compress: (text: string) => Effect.Effect<CompressionResult, CompressionError>
+    readonly compressMany: (
+      texts: ReadonlyArray<string>
+    ) => Effect.Effect<ReadonlyArray<CompressionResult>, CompressionError>
+  }
+>()("fraction/CompressionService") {
+  static readonly layer = Layer.effect(
+    CompressionService,
+    Effect.gen(function* () {
+      const config = yield* FractionConfigRef
+
+      const heuristicProvider = createHeuristicCompressionProvider({
+        maxFactsPerInput: config.maxFactsPerInput
+      })
+
+      const disabledProvider = {
+        compress: (text: string) =>
+          ({
+            content: text.trim(),
+            mode: "off" as const,
+            source: "none" as const
+          }) satisfies CompressionResult,
+        compressMany: (texts: ReadonlyArray<string>) =>
+          texts.map(
+            (text) =>
+              ({
+                content: text.trim(),
+                mode: "off" as const,
+                source: "none" as const
+              }) satisfies CompressionResult
+          )
+      }
+
+      const llmlinguaProvider = createLlmlingua2CompressionProvider({
+        ...config.llmlingua,
+        rate: config.compressionRate
+      })
+
+      const primaryProvider =
+        config.compressionProvider ??
+        (config.compressorType === "off"
+          ? disabledProvider
+          : config.compressorType === "heuristic" || config.llmlingua.enabled === false
+            ? heuristicProvider
+            : llmlinguaProvider)
+
+      const executeProvider = async (
+        provider: {
+          readonly compress: (text: string) => CompressionResult | Promise<CompressionResult>
+          readonly compressMany?: (
+            texts: ReadonlyArray<string>
+          ) => ReadonlyArray<CompressionResult> | Promise<ReadonlyArray<CompressionResult>>
+        },
+        texts: ReadonlyArray<string>
+      ) => {
+        const runOne = (text: string) => provider.compress(text)
+        const outputs = provider.compressMany
+          ? await provider.compressMany(texts)
+          : await Promise.all(texts.map((text) => runOne(text)))
+
+        if (outputs.length !== texts.length) {
+          throw new TypeError(
+            `Expected ${texts.length} compression results but received ${outputs.length}`
+          )
+        }
+
+        return outputs
+      }
+
+      const normalizeResult = (result: CompressionResult): CompressionResult => ({
+        ...result,
+        content: result.content.trim()
+      })
+
+      const runFallback = async (texts: ReadonlyArray<string>) => {
+        const fallback = await executeProvider(heuristicProvider, texts)
+        return fallback.map(
+          (result) =>
+            ({
+              ...normalizeResult(result),
+              source: "fallback"
+            }) satisfies CompressionResult
+        )
+      }
+
+      const runBatch = (texts: ReadonlyArray<string>) =>
+        Effect.tryPromise({
+          try: async () => {
+            try {
+              const results = await executeProvider(primaryProvider, texts)
+              return results.map(normalizeResult)
+            } catch (cause) {
+              const canFallback =
+                config.compressorType !== "off" &&
+                !config.compressionProvider &&
+                config.llmlingua.onUnavailable === "fallback-heuristic"
+
+              if (cause instanceof CompressionUnavailable && canFallback) {
+                return runFallback(texts)
+              }
+
+              throw cause
+            }
+          },
+          catch: (cause) =>
+            cause instanceof CompressionError
+              ? cause
+              : cause instanceof CompressionUnavailable
+                ? new CompressionError({
+                    message: cause.message,
+                    cause: cause.cause
+                  })
+                : new CompressionError({ message: "Failed to compress text", cause })
+        })
+
+      const resolver = RequestResolver.make<CompressTextRequest>((entries) =>
+        runBatch(entries.map((entry) => entry.request.text)).pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              Effect.sync(() => {
+                for (const entry of entries) {
+                  entry.completeUnsafe(Exit.fail(error))
+                }
+              }),
+            onSuccess: (compressed) =>
+              Effect.sync(() => {
+                entries.forEach((entry, index) => {
+                  entry.completeUnsafe(Exit.succeed(compressed[index]!))
+                })
+              })
+          })
+        )
+      )
+
+      const compress = (text: string) =>
+        config.adaptiveCompression && text.length < config.compressionMinChars
+          ? Effect.succeed({
+              content: text.trim(),
+              mode: config.compressionProvider ? "provider" : config.compressorType,
+              source: "none",
+              retainedRatio: 1
+            } satisfies CompressionResult)
+          : Effect.request(CompressTextRequest({ text }), resolver)
+
+      const compressMany = (texts: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          if (texts.length === 0) {
+            return [] as ReadonlyArray<CompressionResult>
+          }
+
+          const results: Array<CompressionResult | undefined> = Array.from({
+            length: texts.length
+          })
+          const pending: Array<{ readonly index: number; readonly text: string }> = []
+
+          texts.forEach((text, index) => {
+            if (config.adaptiveCompression && text.length < config.compressionMinChars) {
+              results[index] = {
+                content: text.trim(),
+                mode: config.compressionProvider ? "provider" : config.compressorType,
+                source: "none",
+                retainedRatio: 1
+              } satisfies CompressionResult
+            } else {
+              pending.push({ index, text })
+            }
+          })
+
+          if (pending.length > 0) {
+            const compressed = yield* runBatch(pending.map((entry) => entry.text))
+            pending.forEach((entry, index) => {
+              results[entry.index] = compressed[index]!
+            })
+          }
+
+          return results.filter((value): value is CompressionResult => value !== undefined)
+        })
+
+      return CompressionService.of({ compress, compressMany })
+    })
+  )
+}
 
 export class EmbeddingService extends ServiceMap.Service<
   EmbeddingService,
@@ -786,14 +985,14 @@ export class EmbeddingService extends ServiceMap.Service<
 export class ExtractionService extends ServiceMap.Service<
   ExtractionService,
   {
-    readonly compress: (text: string) => Effect.Effect<ExtractionResult, ExtractionError>
+    readonly extract: (text: string) => Effect.Effect<ExtractionResult, ExtractionError>
   }
 >()("fraction/ExtractionService") {
   static readonly layer = Layer.effect(
     ExtractionService,
     Effect.gen(function* () {
       const config = yield* FractionConfigRef
-      const compress = (text: string) => {
+      const extract = (text: string) => {
         if (config.extractionProvider) {
           return Effect.tryPromise({
             try: async () => {
@@ -801,7 +1000,7 @@ export class ExtractionService extends ServiceMap.Service<
               const content =
                 extracted.content.trim().length > 0
                   ? extracted.content.trim()
-                  : compressText(text, config.maxFactsPerInput)
+                  : text.trim()
               const entities =
                 extracted.entities.length > 0 ? extracted.entities : extractEntities(content)
               return {
@@ -816,8 +1015,8 @@ export class ExtractionService extends ServiceMap.Service<
         }
 
         return Effect.sync(() => {
-          const content = compressText(text, config.maxFactsPerInput)
-          const eventAt = extractEventAt(text)
+          const content = text.trim()
+          const eventAt = extractEventAt(content)
           return {
             content,
             entities: extractEntities(content),
@@ -829,7 +1028,7 @@ export class ExtractionService extends ServiceMap.Service<
           )
         )
       }
-      return ExtractionService.of({ compress })
+      return ExtractionService.of({ extract })
     })
   )
 }
@@ -918,7 +1117,10 @@ export class AdapterBridgeService extends ServiceMap.Service<
       text: string,
       scope: Scope | undefined,
       metadata?: JsonRecord
-    ) => Effect.Effect<MemoryRecord, StorageError | EmbeddingError | ExtractionError | InvalidScope>
+    ) => Effect.Effect<
+      MemoryRecord,
+      StorageError | CompressionError | EmbeddingError | ExtractionError | InvalidScope
+    >
     readonly formatContext: (
       results: ReadonlyArray<SearchResult>,
       options?: RecallOptions
@@ -994,12 +1196,18 @@ export class MemoryService extends ServiceMap.Service<
           }>,
       scope: Scope,
       metadata?: JsonRecord
-    ) => Effect.Effect<MemoryRecord, StorageError | EmbeddingError | ExtractionError>
+    ) => Effect.Effect<
+      MemoryRecord,
+      StorageError | CompressionError | EmbeddingError | ExtractionError
+    >
     readonly addMany: (
       inputs: ReadonlyArray<string>,
       scope: Scope,
       metadata?: JsonRecord
-    ) => Effect.Effect<ReadonlyArray<MemoryRecord>, StorageError | EmbeddingError | ExtractionError>
+    ) => Effect.Effect<
+      ReadonlyArray<MemoryRecord>,
+      StorageError | CompressionError | EmbeddingError | ExtractionError
+    >
     readonly search: (
       query: string,
       scope: Scope,
@@ -1013,7 +1221,7 @@ export class MemoryService extends ServiceMap.Service<
       metadata?: JsonRecord
     ) => Effect.Effect<
       MemoryRecord,
-      StorageError | MemoryNotFound | EmbeddingError | ExtractionError
+      StorageError | MemoryNotFound | CompressionError | EmbeddingError | ExtractionError
     >
     readonly forget: (id: string) => Effect.Effect<void, StorageError | MemoryNotFound>
     readonly delete: (id: string) => Effect.Effect<void, StorageError>
@@ -1026,6 +1234,7 @@ export class MemoryService extends ServiceMap.Service<
     MemoryService,
     Effect.gen(function* () {
       const repo = yield* MemoryRepo
+      const compression = yield* CompressionService
       const extractor = yield* ExtractionService
       const embeddings = yield* EmbeddingService
       const config = yield* FractionConfigRef
@@ -1058,8 +1267,11 @@ export class MemoryService extends ServiceMap.Service<
       ) =>
         Effect.gen(function* () {
           const rawContent = messagesToText(input)
-          const extracted = yield* extractor.compress(rawContent)
-          const contentHash = hashText(extracted.content)
+          const compressed = yield* compression.compress(rawContent)
+          const extracted = yield* extractor.extract(compressed.content)
+          const finalContent =
+            extracted.content.trim().length > 0 ? extracted.content.trim() : compressed.content
+          const contentHash = hashText(finalContent)
           const existing = yield* repo.listActive(scope)
           const duplicate = existing.find((memory) => hashText(memory.content) === contentHash)
           if (duplicate) {
@@ -1071,7 +1283,7 @@ export class MemoryService extends ServiceMap.Service<
             id: makeMemoryId() as MemoryRecord["id"],
             rootId: makeMemoryId(),
             version: 1,
-            content: extracted.content,
+            content: finalContent,
             rawContent,
             metadata: metadata ?? {},
             scope,
@@ -1092,20 +1304,26 @@ export class MemoryService extends ServiceMap.Service<
             return [] as ReadonlyArray<MemoryRecord>
           }
 
-          const extracted = yield* Effect.forEach(inputs, (input) => extractor.compress(input), {
-            concurrency: "unbounded"
-          })
-          const embeddingsBatch = yield* embeddings.embedMany(
-            extracted.map((entry) => entry.content)
+          const compressed = yield* compression.compressMany(inputs)
+          const extracted = yield* Effect.forEach(
+            compressed.map((entry) => entry.content),
+            (input) => extractor.extract(input),
+            { concurrency: "unbounded" }
           )
+          const embeddingsBatch = yield* embeddings.embedMany(extracted.map((entry) => entry.content))
           const active = [...(yield* repo.listActive(scope))]
           const records: Array<MemoryRecord> = []
 
           for (let index = 0; index < inputs.length; index++) {
             const rawContent = inputs[index]!
+            const compressionResult = compressed[index]!
             const extraction = extracted[index]!
+            const finalContent =
+              extraction.content.trim().length > 0
+                ? extraction.content.trim()
+                : compressionResult.content
             const embedding = embeddingsBatch[index]!
-            const contentHash = hashText(extraction.content)
+            const contentHash = hashText(finalContent)
             const duplicate = active.find((memory) => hashText(memory.content) === contentHash)
 
             if (duplicate) {
@@ -1119,7 +1337,7 @@ export class MemoryService extends ServiceMap.Service<
               id: makeMemoryId() as MemoryRecord["id"],
               rootId: makeMemoryId(),
               version: 1,
-              content: extraction.content,
+              content: finalContent,
               rawContent,
               metadata: metadata ?? {},
               scope,
@@ -1158,14 +1376,16 @@ export class MemoryService extends ServiceMap.Service<
       const update = (id: string, input: string, metadata?: JsonRecord) =>
         Effect.gen(function* () {
           const previous = yield* get(id)
-          const extracted = yield* extractor.compress(input)
+          const compressed = yield* compression.compress(input)
+          const extracted = yield* extractor.extract(compressed.content)
           const updatedAt = nowIso()
           const next = createMemoryRecord({
             id: makeMemoryId() as MemoryRecord["id"],
             rootId: previous.rootId,
             parentId: previous.id,
             version: previous.version + 1,
-            content: extracted.content,
+            content:
+              extracted.content.trim().length > 0 ? extracted.content.trim() : compressed.content,
             rawContent: input,
             metadata: metadata ?? previous.metadata,
             scope: previous.scope,
@@ -1238,11 +1458,47 @@ export const parseConfig = (input: FractionConfigInput | undefined): FractionCon
     rrfK: decoded.rrfK ?? DEFAULT_CONFIG.rrfK,
     embeddingDimensions: decoded.embeddingDimensions ?? DEFAULT_CONFIG.embeddingDimensions,
     maxFactsPerInput: decoded.maxFactsPerInput ?? DEFAULT_CONFIG.maxFactsPerInput,
+    compressorType: decoded.compressorType ?? DEFAULT_CONFIG.compressorType,
+    compressionRate: decoded.compressionRate ?? DEFAULT_CONFIG.compressionRate,
+    adaptiveCompression: decoded.adaptiveCompression ?? DEFAULT_CONFIG.adaptiveCompression,
+    compressionMinChars: decoded.compressionMinChars ?? DEFAULT_CONFIG.compressionMinChars,
     duplicateSimilarity: decoded.duplicateSimilarity ?? DEFAULT_CONFIG.duplicateSimilarity,
     lexicalWeight: decoded.lexicalWeight ?? DEFAULT_CONFIG.lexicalWeight,
     vectorWeight: decoded.vectorWeight ?? DEFAULT_CONFIG.vectorWeight,
     graphWeight: decoded.graphWeight ?? DEFAULT_CONFIG.graphWeight,
     temporalWeight: decoded.temporalWeight ?? DEFAULT_CONFIG.temporalWeight,
+    llmlingua: {
+      enabled: decoded.llmlingua?.enabled ?? DEFAULT_CONFIG.llmlingua.enabled,
+      model: decoded.llmlingua?.model ?? DEFAULT_CONFIG.llmlingua.model,
+      modelFamily: decoded.llmlingua?.modelFamily ?? DEFAULT_CONFIG.llmlingua.modelFamily,
+      cacheDir: decoded.llmlingua?.cacheDir ?? DEFAULT_CONFIG.llmlingua.cacheDir,
+      revision: decoded.llmlingua?.revision,
+      batchSize: decoded.llmlingua?.batchSize ?? DEFAULT_CONFIG.llmlingua.batchSize,
+      device: decoded.llmlingua?.device,
+      dtype: decoded.llmlingua?.dtype,
+      downloadModelIfMissing:
+        decoded.llmlingua?.downloadModelIfMissing ??
+        DEFAULT_CONFIG.llmlingua.downloadModelIfMissing,
+      artifactFiles:
+        decoded.llmlingua?.artifactFiles ?? DEFAULT_CONFIG.llmlingua.artifactFiles,
+      onUnavailable:
+        decoded.llmlingua?.onUnavailable ?? DEFAULT_CONFIG.llmlingua.onUnavailable,
+      tokenToWord: decoded.llmlingua?.tokenToWord ?? DEFAULT_CONFIG.llmlingua.tokenToWord,
+      chunkEndTokens:
+        decoded.llmlingua?.chunkEndTokens ?? DEFAULT_CONFIG.llmlingua.chunkEndTokens,
+      forceTokens: decoded.llmlingua?.forceTokens ?? DEFAULT_CONFIG.llmlingua.forceTokens,
+      forceReserveDigit:
+        decoded.llmlingua?.forceReserveDigit ?? DEFAULT_CONFIG.llmlingua.forceReserveDigit,
+      dropConsecutive:
+        decoded.llmlingua?.dropConsecutive ?? DEFAULT_CONFIG.llmlingua.dropConsecutive,
+      ...((decoded.llmlingua?.artifactBaseUrl ?? DEFAULT_CONFIG.llmlingua.artifactBaseUrl)
+        ? {
+            artifactBaseUrl:
+              decoded.llmlingua?.artifactBaseUrl ?? DEFAULT_CONFIG.llmlingua.artifactBaseUrl
+          }
+        : {})
+    },
+    ...(input?.compressionProvider ? { compressionProvider: input.compressionProvider } : {}),
     ...(input?.embeddingProvider ? { embeddingProvider: input.embeddingProvider } : {}),
     ...(input?.extractionProvider ? { extractionProvider: input.extractionProvider } : {})
   }
@@ -1256,6 +1512,7 @@ export const createFractionLayer = (input?: FractionConfigInput) => {
   )
   const migrationLayer = MigrationService.layer.pipe(Layer.provide(infraLayer))
   const repoLayer = MemoryRepo.layer.pipe(Layer.provide(infraLayer))
+  const compressionLayer = CompressionService.layer.pipe(Layer.provide(infraLayer))
   const embeddingLayer = EmbeddingService.layer.pipe(Layer.provide(infraLayer))
   const extractionLayer = ExtractionService.layer.pipe(Layer.provide(infraLayer))
   const retrievalDeps = Layer.mergeAll(infraLayer, repoLayer, embeddingLayer)
@@ -1263,6 +1520,7 @@ export const createFractionLayer = (input?: FractionConfigInput) => {
   const memoryDeps = Layer.mergeAll(
     infraLayer,
     repoLayer,
+    compressionLayer,
     embeddingLayer,
     extractionLayer,
     retrievalLayer
@@ -1276,6 +1534,7 @@ export const createFractionLayer = (input?: FractionConfigInput) => {
     infraLayer,
     migrationLayer,
     repoLayer,
+    compressionLayer,
     embeddingLayer,
     extractionLayer,
     retrievalLayer,
@@ -1289,12 +1548,18 @@ export type FractionRuntime = ManagedRuntime.ManagedRuntime<
   | SqlClient.SqlClient
   | MigrationService
   | MemoryRepo
+  | CompressionService
   | EmbeddingService
   | ExtractionService
   | RetrievalService
   | AdapterBridgeService
   | MemoryService,
-  MigrationError | StorageError | EmbeddingError | ExtractionError | RetrievalError
+  | MigrationError
+  | StorageError
+  | CompressionError
+  | EmbeddingError
+  | ExtractionError
+  | RetrievalError
 >
 
 export const createFractionRuntime = (

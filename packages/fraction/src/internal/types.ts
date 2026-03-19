@@ -1,4 +1,12 @@
+import { homedir } from "node:os"
+import { join } from "node:path"
+
 import { Schema } from "effect"
+
+import {
+  DEFAULT_LLMLINGUA_ARTIFACT_FILES,
+  defaultLlmlinguaModelPath
+} from "./llmlingua/artifacts"
 
 export const MemoryIdSchema = Schema.String.pipe(Schema.brand("MemoryId"))
 export type MemoryId = Schema.Schema.Type<typeof MemoryIdSchema>
@@ -46,12 +54,44 @@ export const RememberOptionsSchema = Schema.Struct({
 })
 export type RememberOptions = Schema.Schema.Type<typeof RememberOptionsSchema>
 
+export const CompressionModeSchema = Schema.Literals(["llmlingua2", "heuristic", "provider", "off"])
+export type CompressionMode = Schema.Schema.Type<typeof CompressionModeSchema>
+
+export const CompressionUnavailablePolicySchema = Schema.Literals([
+  "fallback-heuristic",
+  "error"
+])
+export type CompressionUnavailablePolicy = Schema.Schema.Type<
+  typeof CompressionUnavailablePolicySchema
+>
+
+export const LlmlinguaModelFamilySchema = Schema.Literals(["bert", "xlm-roberta"])
+export type LlmlinguaModelFamily = Schema.Schema.Type<typeof LlmlinguaModelFamilySchema>
+
+export const CompressionResultSchema = Schema.Struct({
+  content: Schema.String,
+  mode: CompressionModeSchema,
+  source: Schema.Literals(["native", "remote", "fallback", "none"]),
+  retainedRatio: Schema.optional(Schema.Number),
+  tokenCountBefore: Schema.optional(Schema.Number),
+  tokenCountAfter: Schema.optional(Schema.Number)
+})
+export type CompressionResult = Schema.Schema.Type<typeof CompressionResultSchema>
+
 export const ExtractionResultSchema = Schema.Struct({
   content: Schema.String,
   entities: Schema.Array(Schema.String),
   eventAt: Schema.optional(Schema.String)
 })
 export type ExtractionResult = Schema.Schema.Type<typeof ExtractionResultSchema>
+
+export interface CompressionProvider {
+  readonly compress: (text: string) => CompressionResult | Promise<CompressionResult>
+  readonly compressMany?: (
+    texts: ReadonlyArray<string>
+  ) => ReadonlyArray<CompressionResult> | Promise<ReadonlyArray<CompressionResult>>
+  readonly close?: () => void | Promise<void>
+}
 
 export interface EmbeddingProvider {
   readonly embed: (
@@ -70,6 +110,44 @@ export interface ExtractionProvider {
   readonly close?: () => void | Promise<void>
 }
 
+export const LlmlinguaConfigSchema = Schema.Struct({
+  enabled: Schema.optional(Schema.Boolean),
+  model: Schema.optional(Schema.String),
+  modelFamily: Schema.optional(LlmlinguaModelFamilySchema),
+  cacheDir: Schema.optional(Schema.String),
+  revision: Schema.optional(Schema.String),
+  batchSize: Schema.optional(Schema.Number),
+  device: Schema.optional(Schema.String),
+  dtype: Schema.optional(Schema.String),
+  downloadModelIfMissing: Schema.optional(Schema.Boolean),
+  artifactBaseUrl: Schema.optional(Schema.String),
+  artifactFiles: Schema.optional(Schema.Array(Schema.String)),
+  onUnavailable: Schema.optional(CompressionUnavailablePolicySchema),
+  tokenToWord: Schema.optional(Schema.Literals(["mean", "first"])),
+  chunkEndTokens: Schema.optional(Schema.Array(Schema.String)),
+  forceTokens: Schema.optional(Schema.Array(Schema.String)),
+  forceReserveDigit: Schema.optional(Schema.Boolean),
+  dropConsecutive: Schema.optional(Schema.Boolean)
+})
+type LlmlinguaConfigSchemaInput = Schema.Schema.Type<typeof LlmlinguaConfigSchema>
+
+export interface LlmlinguaConfig extends LlmlinguaConfigSchemaInput {
+  readonly enabled: boolean
+  readonly model: string
+  readonly modelFamily: LlmlinguaModelFamily
+  readonly cacheDir: string
+  readonly batchSize: number
+  readonly downloadModelIfMissing: boolean
+  readonly artifactBaseUrl?: string
+  readonly artifactFiles: ReadonlyArray<string>
+  readonly onUnavailable: CompressionUnavailablePolicy
+  readonly tokenToWord: "mean" | "first"
+  readonly chunkEndTokens: ReadonlyArray<string>
+  readonly forceTokens: ReadonlyArray<string>
+  readonly forceReserveDigit: boolean
+  readonly dropConsecutive: boolean
+}
+
 export const FractionConfigSchema = Schema.Struct({
   filename: Schema.optional(Schema.String),
   defaultNamespace: Schema.optional(Schema.String),
@@ -77,15 +155,21 @@ export const FractionConfigSchema = Schema.Struct({
   rrfK: Schema.optional(Schema.Number),
   embeddingDimensions: Schema.optional(Schema.Number),
   maxFactsPerInput: Schema.optional(Schema.Number),
+  compressorType: Schema.optional(CompressionModeSchema),
+  compressionRate: Schema.optional(Schema.Number),
+  adaptiveCompression: Schema.optional(Schema.Boolean),
+  compressionMinChars: Schema.optional(Schema.Number),
   duplicateSimilarity: Schema.optional(Schema.Number),
   lexicalWeight: Schema.optional(Schema.Number),
   vectorWeight: Schema.optional(Schema.Number),
   graphWeight: Schema.optional(Schema.Number),
-  temporalWeight: Schema.optional(Schema.Number)
+  temporalWeight: Schema.optional(Schema.Number),
+  llmlingua: Schema.optional(LlmlinguaConfigSchema)
 })
 type FractionConfigSchemaInput = Schema.Schema.Type<typeof FractionConfigSchema>
 
 export interface FractionConfigInput extends FractionConfigSchemaInput {
+  readonly compressionProvider?: CompressionProvider
   readonly embeddingProvider?: EmbeddingProvider
   readonly extractionProvider?: ExtractionProvider
 }
@@ -97,11 +181,17 @@ export interface FractionConfig extends Required<FractionConfigSchemaInput> {
   readonly rrfK: number
   readonly embeddingDimensions: number
   readonly maxFactsPerInput: number
+  readonly compressorType: CompressionMode
+  readonly compressionRate: number
+  readonly adaptiveCompression: boolean
+  readonly compressionMinChars: number
   readonly duplicateSimilarity: number
   readonly lexicalWeight: number
   readonly vectorWeight: number
   readonly graphWeight: number
   readonly temporalWeight: number
+  readonly llmlingua: LlmlinguaConfig
+  readonly compressionProvider?: CompressionProvider
   readonly embeddingProvider?: EmbeddingProvider
   readonly extractionProvider?: ExtractionProvider
 }
@@ -147,11 +237,33 @@ export const DEFAULT_CONFIG: FractionConfig = {
   rrfK: 30,
   embeddingDimensions: 384,
   maxFactsPerInput: 3,
+  compressorType: "llmlingua2",
+  compressionRate: 0.6,
+  adaptiveCompression: true,
+  compressionMinChars: 160,
   duplicateSimilarity: 0.98,
   lexicalWeight: 1.2,
   vectorWeight: 1,
   graphWeight: 0.8,
-  temporalWeight: 1
+  temporalWeight: 1,
+  llmlingua: {
+    enabled: true,
+    model: defaultLlmlinguaModelPath(join(homedir(), ".fraction", "models")),
+    modelFamily: "bert",
+    cacheDir: join(homedir(), ".fraction", "models"),
+    batchSize: 16,
+    downloadModelIfMissing: true,
+    artifactFiles: [...DEFAULT_LLMLINGUA_ARTIFACT_FILES],
+    onUnavailable: "fallback-heuristic",
+    tokenToWord: "mean",
+    chunkEndTokens: [".", "\n"],
+    forceTokens: [],
+    forceReserveDigit: false,
+    dropConsecutive: false,
+    ...(process.env.FRACTION_LLMLINGUA_ARTIFACT_BASE_URL
+      ? { artifactBaseUrl: process.env.FRACTION_LLMLINGUA_ARTIFACT_BASE_URL }
+      : {})
+  }
 }
 
 export type MetadataFor<TSchema extends Schema.Top | undefined> = TSchema extends Schema.Top

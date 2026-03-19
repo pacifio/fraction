@@ -16,6 +16,8 @@ bun add @fraction/tanstack-ai fraction @tanstack/ai
 - `remember(options)`
 - `recall(options)`
 - `formatFractionContext(options)`
+- `createTanStackExtractionProvider(options)`
+- `createTanStackCompressionProvider(options)`
 
 ## Example
 

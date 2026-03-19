@@ -22,14 +22,18 @@
   "scripts": {
     "build": "bun build src/index.ts src/effect.ts --outdir dist --target bun --format esm && bun x tsc -p tsconfig.build.json --emitDeclarationOnly",
     "check": "bun x tsc -p tsconfig.json --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "convert:llmlingua": "bun scripts/convert-llmlingua-model.ts",
+    "validate:llmlingua": "bun scripts/validate-llmlingua-model.ts",
+    "release:llmlingua": "bun scripts/release-llmlingua-model.ts"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-beta.33",
     "@effect/sql-sqlite-bun": "4.0.0-beta.33",
     "@huggingface/transformers": "^3.8.1",
     "chrono-node": "2.9.0",
-    "effect": "4.0.0-beta.33"
+    "effect": "4.0.0-beta.33",
+    "js-tiktoken": "^1.0.21"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.33"

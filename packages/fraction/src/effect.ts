@@ -2,6 +2,8 @@ import { Schema } from "effect"
 
 import {
   AdapterError,
+  CompressionError,
+  CompressionUnavailable,
   EmbeddingError,
   ExtractionError,
   InvalidScope,
@@ -12,6 +14,7 @@ import {
 } from "./internal/errors"
 import {
   AdapterBridgeService,
+  CompressionService,
   createFractionLayer,
   createFractionRuntime,
   EmbeddingService,
@@ -24,13 +27,24 @@ import {
   parseConfig,
   RetrievalService
 } from "./internal/services"
-import { createTransformersEmbeddingProvider } from "./internal/providers"
 import {
+  createHeuristicCompressionProvider,
+  createLlmlingua2CompressionProvider,
+  createTransformersEmbeddingProvider,
+  prefetchLlmlinguaModel
+} from "./internal/providers"
+import { createLlmlingua2Compressor } from "./internal/llmlingua/compressor"
+import {
+  CompressionModeSchema,
+  CompressionResultSchema,
+  CompressionUnavailablePolicySchema,
   DEFAULT_CONFIG,
   ExtractionResultSchema,
   FilterLeafSchema,
   FractionConfigSchema,
   HistoryEventSchema,
+  LlmlinguaConfigSchema,
+  LlmlinguaModelFamilySchema,
   MemoryIdSchema,
   MemoryRecordSchema,
   MessageSchema,
@@ -46,7 +60,17 @@ export type { FractionRuntime } from "./internal/services"
 export {
   AdapterError,
   AdapterBridgeService,
+  CompressionError,
+  CompressionModeSchema,
+  CompressionResultSchema,
+  CompressionService,
+  CompressionUnavailable,
+  CompressionUnavailablePolicySchema,
+  createHeuristicCompressionProvider,
+  createLlmlingua2CompressionProvider,
+  createLlmlingua2Compressor,
   createTransformersEmbeddingProvider,
+  prefetchLlmlinguaModel,
   createFractionLayer,
   createFractionRuntime,
   DEFAULT_CONFIG,
@@ -60,6 +84,8 @@ export {
   FractionConfigSchema,
   HistoryEventSchema,
   InvalidScope,
+  LlmlinguaConfigSchema,
+  LlmlinguaModelFamilySchema,
   MemoryIdSchema,
   MemoryNotFound,
   MemoryRecordSchema,
@@ -79,6 +105,10 @@ export {
 }
 
 export type {
+  CompressionMode,
+  CompressionProvider,
+  CompressionResult,
+  CompressionUnavailablePolicy,
   EmbeddingProvider,
   ExtractionProvider,
   ExtractionResult,
@@ -88,6 +118,8 @@ export type {
   FractionConfigInput,
   HistoryEvent,
   JsonRecord,
+  LlmlinguaConfig,
+  LlmlinguaModelFamily,
   MemoryId,
   MemoryRecord,
   Message,
@@ -103,6 +135,11 @@ export const FractionSchemas = {
   Scope: ScopeSchema,
   Message: MessageSchema,
   FractionConfig: FractionConfigSchema,
+  CompressionMode: CompressionModeSchema,
+  CompressionResult: CompressionResultSchema,
+  CompressionUnavailablePolicy: CompressionUnavailablePolicySchema,
+  LlmlinguaConfig: LlmlinguaConfigSchema,
+  LlmlinguaModelFamily: LlmlinguaModelFamilySchema,
   ExtractionResult: ExtractionResultSchema,
   MemoryRecord: MemoryRecordSchema,
   HistoryEvent: HistoryEventSchema,
@@ -114,6 +151,8 @@ export const FractionSchemas = {
 
 export const FractionErrors = {
   AdapterError,
+  CompressionError,
+  CompressionUnavailable,
   EmbeddingError,
   ExtractionError,
   InvalidScope,

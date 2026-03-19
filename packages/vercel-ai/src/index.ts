@@ -14,6 +14,7 @@ import type { ManagedRuntime } from "effect"
 import type { EmbeddingModel, LanguageModel } from "ai"
 
 import type {
+  CompressionProvider,
   EmbeddingProvider,
   ExtractionProvider,
   FilterExpr,
@@ -25,6 +26,7 @@ import type {
 import {
   AdapterBridgeService,
   ExtractionResultSchema,
+  CompressionResultSchema,
   type SearchResult,
   MemoryService
 } from "fraction/effect"
@@ -69,6 +71,14 @@ export interface VercelEmbeddingProviderOptions {
 }
 
 export interface VercelExtractionProviderOptions {
+  readonly model: LanguageModel
+  readonly maxRetries?: number
+  readonly providerOptions?: SharedV3ProviderOptions
+  readonly headers?: Record<string, string>
+  readonly prompt?: string | ((input: { readonly text: string }) => string)
+}
+
+export interface VercelCompressionProviderOptions {
   readonly model: LanguageModel
   readonly maxRetries?: number
   readonly providerOptions?: SharedV3ProviderOptions
@@ -129,6 +139,26 @@ const defaultExtractionPrompt = (text: string) =>
     "- entities: a list of named entities, people, places, organizations, emails, or products",
     "- eventAt: optional ISO timestamp only when the text clearly references a specific time",
     "Keep content concise and omit filler.",
+    "",
+    text
+  ].join("\n")
+
+const CompressionOutputSchema = Schema.Struct({
+  content: Schema.String,
+  retainedRatio: Schema.optional(Schema.Number),
+  tokenCountBefore: Schema.optional(Schema.Number),
+  tokenCountAfter: Schema.optional(Schema.Number)
+})
+
+const defaultCompressionPrompt = (text: string) =>
+  [
+    "Compress the source text into a shorter durable memory string while preserving key facts.",
+    "Return an object with:",
+    "- content: compressed text",
+    "- retainedRatio: optional decimal fraction of kept tokens",
+    "- tokenCountBefore: optional token count before compression",
+    "- tokenCountAfter: optional token count after compression",
+    "Do not add commentary.",
     "",
     text
   ].join("\n")
@@ -383,6 +413,49 @@ export const createVercelExtractionProvider = (
     return result.output
   }
 })
+
+export const createVercelCompressionProvider = (
+  options: VercelCompressionProviderOptions
+): CompressionProvider => {
+  const compress = async (text: string) => {
+    const result = await generateText({
+      model: options.model,
+      prompt:
+        typeof options.prompt === "function"
+          ? options.prompt({ text })
+          : (options.prompt ?? defaultCompressionPrompt(text)),
+      ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
+      ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
+      ...(options.headers ? { headers: options.headers } : {}),
+      output: Output.object({
+        schema: effectSchemaToAiSchema(CompressionOutputSchema),
+        name: "fraction_memory_compression",
+        description: "Compressed durable memory text"
+      })
+    })
+
+    return {
+      content: result.output.content,
+      mode: "provider",
+      source: "remote",
+      ...(result.output.retainedRatio !== undefined
+        ? { retainedRatio: result.output.retainedRatio }
+        : {}),
+      ...(result.output.tokenCountBefore !== undefined
+        ? { tokenCountBefore: result.output.tokenCountBefore }
+        : {}),
+      ...(result.output.tokenCountAfter !== undefined
+        ? { tokenCountAfter: result.output.tokenCountAfter }
+        : {})
+    } satisfies Schema.Schema.Type<typeof CompressionResultSchema>
+  }
+
+  return {
+    compress,
+    compressMany: async (texts: ReadonlyArray<string>) =>
+      Promise.all(texts.map((text: string) => compress(text)))
+  }
+}
 
 export const fractionTools = (options: VercelFractionMemoryOptions) => {
   const runtime = getRuntime(options.memory)

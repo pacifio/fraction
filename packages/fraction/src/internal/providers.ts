@@ -1,8 +1,10 @@
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-import type { EmbeddingProvider } from "./types"
-import { toFloat32Vector } from "./utils"
+import { CompressionUnavailable } from "./errors"
+import { createLlmlingua2Compressor, prefetchLlmlinguaArtifacts } from "./llmlingua/compressor"
+import type { CompressionProvider, EmbeddingProvider, LlmlinguaConfig } from "./types"
+import { compressText, toFloat32Vector } from "./utils"
 
 export interface TransformersEmbeddingProviderOptions {
   readonly model?: string
@@ -145,3 +147,144 @@ export const createTransformersEmbeddingProvider = (
     }
   }
 }
+
+export interface HeuristicCompressionProviderOptions {
+  readonly maxFactsPerInput?: number
+}
+
+export const createHeuristicCompressionProvider = (
+  options: HeuristicCompressionProviderOptions = {}
+): CompressionProvider => ({
+  compress: (text) => {
+    const content = compressText(text, options.maxFactsPerInput ?? 3)
+    return {
+      content,
+      mode: "heuristic",
+      source: "native"
+    }
+  },
+  compressMany: (texts) =>
+    texts.map((text) => ({
+      content: compressText(text, options.maxFactsPerInput ?? 3),
+      mode: "heuristic" as const,
+      source: "native" as const
+    }))
+})
+
+export const createLlmlingua2CompressionProvider = (
+  options: LlmlinguaConfig & {
+    readonly rate?: number
+  }
+): CompressionProvider => {
+  let compressorPromise:
+    | Promise<ReturnType<typeof createLlmlingua2Compressor>>
+    | undefined
+
+  const getCompressor = async () => {
+    compressorPromise ??= Promise.resolve(
+      createLlmlingua2Compressor({
+        model: options.model,
+        modelFamily: options.modelFamily,
+        ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}),
+        ...(options.revision ? { revision: options.revision } : {}),
+        ...(options.device ? { device: options.device } : {}),
+        ...(options.dtype ? { dtype: options.dtype } : {}),
+        downloadModelIfMissing: options.downloadModelIfMissing,
+        ...(options.artifactBaseUrl ? { artifactBaseUrl: options.artifactBaseUrl } : {}),
+        ...(options.artifactFiles ? { artifactFiles: options.artifactFiles } : {}),
+        batchSize: options.batchSize
+      })
+    )
+    return compressorPromise
+  }
+
+  const toResult = async (text: string) => {
+    try {
+      const compressor = await getCompressor()
+      const result = await compressor.compress(text, {
+        rate: options.rate ?? 0.6,
+        tokenToWord: options.tokenToWord,
+        forceTokens: options.forceTokens,
+        forceReserveDigit: options.forceReserveDigit,
+        dropConsecutive: options.dropConsecutive,
+        chunkEndTokens: options.chunkEndTokens
+      })
+      return {
+        content: result.content,
+        mode: "llmlingua2" as const,
+        source: "native" as const,
+        retainedRatio: result.retainedRatio,
+        tokenCountBefore: result.tokenCountBefore,
+        tokenCountAfter: result.tokenCountAfter
+      }
+    } catch (cause) {
+      if (cause instanceof CompressionUnavailable) {
+        throw cause
+      }
+      throw new CompressionUnavailable({
+        message: "LLMLingua-2 provider failed to compress text",
+        model: options.model,
+        cause
+      })
+    }
+  }
+
+  return {
+    compress: (text) => toResult(text),
+    compressMany: async (texts) => {
+      const compressor = await getCompressor()
+      try {
+        return Promise.all(
+          texts.map(async (text) => {
+            const result = await compressor.compress(text, {
+              rate: options.rate ?? 0.6,
+              tokenToWord: options.tokenToWord,
+              forceTokens: options.forceTokens,
+              forceReserveDigit: options.forceReserveDigit,
+              dropConsecutive: options.dropConsecutive,
+              chunkEndTokens: options.chunkEndTokens
+            })
+            return {
+              content: result.content,
+              mode: "llmlingua2" as const,
+              source: "native" as const,
+              retainedRatio: result.retainedRatio,
+              tokenCountBefore: result.tokenCountBefore,
+              tokenCountAfter: result.tokenCountAfter
+            }
+          })
+        )
+      } catch (cause) {
+        if (cause instanceof CompressionUnavailable) {
+          throw cause
+        }
+        throw new CompressionUnavailable({
+          message: "LLMLingua-2 provider failed to compress batch",
+          model: options.model,
+          cause
+        })
+      }
+    },
+    close: async () => {
+      if (!compressorPromise) {
+        return
+      }
+      const compressor = await compressorPromise
+      await compressor.close()
+      compressorPromise = undefined
+    }
+  }
+}
+
+export const prefetchLlmlinguaModel = (options: LlmlinguaConfig) =>
+  prefetchLlmlinguaArtifacts({
+    model: options.model,
+    modelFamily: options.modelFamily,
+    ...(options.cacheDir ? { cacheDir: options.cacheDir } : {}),
+    ...(options.revision ? { revision: options.revision } : {}),
+    ...(options.device ? { device: options.device } : {}),
+    ...(options.dtype ? { dtype: options.dtype } : {}),
+    downloadModelIfMissing: options.downloadModelIfMissing,
+    ...(options.artifactBaseUrl ? { artifactBaseUrl: options.artifactBaseUrl } : {}),
+    ...(options.artifactFiles ? { artifactFiles: options.artifactFiles } : {})
+  })

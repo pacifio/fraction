@@ -5,7 +5,12 @@ import { join } from "node:path"
 
 import { Fraction } from "fraction"
 
-import { createTanStackExtractionProvider, fractionMiddleware, fractionTools } from "../src/index"
+import {
+  createTanStackCompressionProvider,
+  createTanStackExtractionProvider,
+  fractionMiddleware,
+  fractionTools
+} from "../src/index"
 
 const openClients: Array<{ close: () => Promise<void> }> = []
 const createdPaths = new Set<string>()
@@ -27,7 +32,11 @@ describe("@fraction/tanstack-ai", () => {
     const filename = join(process.cwd(), `.tmp-fraction-tanstack-${Date.now()}.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Fraction.open({ filename, defaultNamespace: "test" })
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
     openClients.push(memory)
 
     const tools = fractionTools({ memory, scope: { namespace: "test" } })
@@ -46,7 +55,11 @@ describe("@fraction/tanstack-ai", () => {
     const filename = join(process.cwd(), `.tmp-fraction-tanstack-mw-${Date.now()}.sqlite`)
     createdPaths.add(filename)
 
-    const memory = await Fraction.open({ filename, defaultNamespace: "test" })
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
     openClients.push(memory)
     await memory.add("Rina prefers concise technical answers.", { namespace: "test" })
 
@@ -85,7 +98,7 @@ describe("@fraction/tanstack-ai", () => {
     expect(config?.systemPrompts?.[0]?.includes("Relevant Memory")).toBeTrue()
   })
 
-  test("creates a TanStack summarize-backed extraction provider", async () => {
+  test("creates TanStack summarize-backed extraction and compression providers", async () => {
     const adapter: SummarizeAdapter = {
       kind: "summarize",
       name: "test",
@@ -108,9 +121,34 @@ describe("@fraction/tanstack-ai", () => {
     }
 
     const provider = createTanStackExtractionProvider({ adapter })
+    const compressionProvider = createTanStackCompressionProvider({
+      adapter: {
+        ...adapter,
+        summarize: async () => ({
+          id: "summary-2",
+          model: "summary-model",
+          summary: JSON.stringify({
+            content: "Rina prefers concise technical answers.",
+            retainedRatio: 0.5,
+            tokenCountBefore: 12,
+            tokenCountAfter: 6
+          }),
+          usage: {
+            promptTokens: 1,
+            completionTokens: 1,
+            totalTokens: 2
+          }
+        })
+      }
+    })
     const extraction = await provider.extract("Rina prefers concise technical answers.")
+    const compression = await compressionProvider.compress(
+      "Rina prefers concise technical answers in Fraction."
+    )
 
     expect(extraction.content).toBe("Rina prefers concise technical answers.")
     expect(extraction.entities).toEqual(["Rina"])
+    expect(compression.content).toBe("Rina prefers concise technical answers.")
+    expect(compression.mode).toBe("provider")
   })
 })

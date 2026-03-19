@@ -7,10 +7,18 @@ import {
   parseConfig
 } from "./internal/services"
 import {
+  createHeuristicCompressionProvider,
+  createLlmlingua2CompressionProvider,
   createTransformersEmbeddingProvider,
+  prefetchLlmlinguaModel,
+  type HeuristicCompressionProviderOptions,
   type TransformersEmbeddingProviderOptions
 } from "./internal/providers"
+import { createLlmlingua2Compressor } from "./internal/llmlingua/compressor"
 import type {
+  CompressionProvider,
+  CompressionResult,
+  CompressionUnavailablePolicy,
   EmbeddingProvider,
   ExtractionProvider,
   FilterExpr,
@@ -23,12 +31,17 @@ import type {
   MetadataFor,
   RecallOptions,
   RememberOptions,
+  LlmlinguaConfig,
+  LlmlinguaModelFamily,
   Scope,
   SearchResult
 } from "./internal/types"
 import { normalizeScope } from "./internal/utils"
 
 export type {
+  CompressionProvider,
+  CompressionResult,
+  CompressionUnavailablePolicy,
   EmbeddingProvider,
   ExtractionProvider,
   FilterExpr,
@@ -40,11 +53,22 @@ export type {
   Message,
   RecallOptions,
   RememberOptions,
+  LlmlinguaConfig,
+  LlmlinguaModelFamily,
   Scope,
   SearchResult
 } from "./internal/types"
-export type { TransformersEmbeddingProviderOptions } from "./internal/providers"
-export { createTransformersEmbeddingProvider }
+export type {
+  HeuristicCompressionProviderOptions,
+  TransformersEmbeddingProviderOptions
+} from "./internal/providers"
+export {
+  createHeuristicCompressionProvider,
+  createLlmlingua2Compressor,
+  createLlmlingua2CompressionProvider,
+  createTransformersEmbeddingProvider,
+  prefetchLlmlinguaModel
+}
 
 export interface SearchOptions {
   readonly limit?: number

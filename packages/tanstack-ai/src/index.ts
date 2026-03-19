@@ -12,6 +12,7 @@ import {
 import type { ManagedRuntime } from "effect"
 
 import type {
+  CompressionProvider,
   ExtractionProvider,
   FilterExpr,
   FractionClient,
@@ -21,6 +22,7 @@ import type {
 } from "fraction"
 import {
   AdapterBridgeService,
+  CompressionResultSchema,
   ExtractionResultSchema,
   type SearchResult,
   MemoryService
@@ -60,6 +62,15 @@ export interface TanStackFractionMemoryOptions {
 }
 
 export interface TanStackExtractionProviderOptions<
+  TAdapter extends SummarizeAdapter<string, object> = SummarizeAdapter<string, object>
+> {
+  readonly adapter: TAdapter
+  readonly modelOptions?: object
+  readonly prompt?: string | ((input: { readonly text: string }) => string)
+  readonly maxLength?: number
+}
+
+export interface TanStackCompressionProviderOptions<
   TAdapter extends SummarizeAdapter<string, object> = SummarizeAdapter<string, object>
 > {
   readonly adapter: TAdapter
@@ -110,6 +121,27 @@ const defaultExtractionPrompt = (text: string) =>
     '{"content":"string","entities":["string"],"eventAt":"optional ISO timestamp"}',
     "Extract a concise durable memory from the source text and list important named entities.",
     "Only include eventAt when the source clearly references a specific time.",
+    "",
+    text
+  ].join("\n")
+
+const CompressionOutputSchema = Schema.Struct({
+  content: Schema.String,
+  retainedRatio: Schema.optional(Schema.Number),
+  tokenCountBefore: Schema.optional(Schema.Number),
+  tokenCountAfter: Schema.optional(Schema.Number)
+})
+
+const decodeCompressionResult = Schema.decodeUnknownSync(
+  CompressionOutputSchema as typeof CompressionOutputSchema & { readonly DecodingServices: never }
+)
+
+const defaultCompressionPrompt = (text: string) =>
+  [
+    "Return JSON only.",
+    "Schema:",
+    '{"content":"string","retainedRatio":"optional number","tokenCountBefore":"optional number","tokenCountAfter":"optional number"}',
+    "Compress the source text into a shorter durable memory string while preserving key facts.",
     "",
     text
   ].join("\n")
@@ -256,6 +288,40 @@ export const createTanStackExtractionProvider = <TAdapter extends SummarizeAdapt
     return decodeExtractionResult(JSON.parse(stripFence(result.summary)))
   }
 })
+
+export const createTanStackCompressionProvider = <TAdapter extends SummarizeAdapter<string, object>>(
+  options: TanStackCompressionProviderOptions<TAdapter>
+): CompressionProvider => {
+  const compress = async (text: string) => {
+    const result = await summarize({
+      adapter: options.adapter,
+      text:
+        typeof options.prompt === "function"
+          ? options.prompt({ text })
+          : (options.prompt ?? defaultCompressionPrompt(text)),
+      style: "concise",
+      ...(options.maxLength !== undefined ? { maxLength: options.maxLength } : {}),
+      ...(options.modelOptions ? { modelOptions: options.modelOptions as never } : {})
+    })
+    const parsed = decodeCompressionResult(JSON.parse(stripFence(result.summary)))
+    return {
+      content: parsed.content,
+      mode: "provider",
+      source: "remote",
+      ...(parsed.retainedRatio !== undefined ? { retainedRatio: parsed.retainedRatio } : {}),
+      ...(parsed.tokenCountBefore !== undefined
+        ? { tokenCountBefore: parsed.tokenCountBefore }
+        : {}),
+      ...(parsed.tokenCountAfter !== undefined ? { tokenCountAfter: parsed.tokenCountAfter } : {})
+    } satisfies Schema.Schema.Type<typeof CompressionResultSchema>
+  }
+
+  return {
+    compress,
+    compressMany: async (texts: ReadonlyArray<string>) =>
+      Promise.all(texts.map((text: string) => compress(text)))
+  }
+}
 
 export const fractionTools = (
   options: TanStackFractionMemoryOptions
