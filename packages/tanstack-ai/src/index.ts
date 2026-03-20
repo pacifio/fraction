@@ -272,22 +272,15 @@ const memoryMatchesScope = (record: MemoryRecord, scope: Scope) =>
   sameScopeValue(record.scope.runId, scope.runId) &&
   sameScopeValue(record.scope.appId, scope.appId)
 
-const isMemoryNotFound = (error: unknown): error is MemoryNotFound =>
-  typeof error === "object" && error !== null && "_tag" in error && error._tag === "MemoryNotFound"
-
 const getMemoryRecord = async (
   runtime: ManagedRuntime.ManagedRuntime<any, any>,
   id: string
-) => {
-  try {
-    return await runtime.runPromise(MemoryService.use((service) => service.get(id)))
-  } catch (error) {
-    if (isMemoryNotFound(error)) {
-      return undefined
-    }
-    throw error
-  }
-}
+) =>
+  runtime.runPromise(
+    MemoryService.use((service) => service.get(id)).pipe(
+      Effect.catchTag("MemoryNotFound", (_error: MemoryNotFound) => Effect.succeed(undefined))
+    )
+  )
 
 const getScopedMemory = async (
   runtime: ManagedRuntime.ManagedRuntime<any, any>,

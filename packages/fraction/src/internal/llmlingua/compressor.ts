@@ -1,7 +1,6 @@
+import { Effect } from "effect"
 import { Tiktoken } from "js-tiktoken/lite"
 import o200kBase from "js-tiktoken/ranks/o200k_base"
-
-import { CompressionUnavailable } from "../errors"
 
 import { loadLlmlinguaSession } from "./loader"
 import { softmaxProbability } from "./softmax"
@@ -505,22 +504,21 @@ export const createLlmlingua2Compressor = (
   return {
     compress: async (text, options) => compressPrompt(text, options),
     compressPrompt,
-    close: async () => {
-      if (!sessionPromise) {
-        return
-      }
-      try {
-        const session = await sessionPromise
-        await session.dispose()
-      } catch (cause) {
-        throw new CompressionUnavailable({
-          message: "Failed to dispose LLMLingua-2 model resources",
-          model: runtimeOptions.model,
-          cause
-        })
-      } finally {
-        sessionPromise = undefined
-      }
+    close: () => {
+      const current = sessionPromise
+      sessionPromise = undefined
+
+      return current
+        ? Effect.runPromise(
+            Effect.tryPromise({
+              try: async () => {
+                const session = await current
+                await session.dispose()
+              },
+              catch: (cause) => cause
+            }).pipe(Effect.ignore)
+          )
+        : Promise.resolve()
     }
   }
 }

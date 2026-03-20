@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { rmSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { Schema } from "effect"
 
+import { MemoryService, createFractionRuntime } from "../src/effect"
 import { Memory } from "../src/index"
 
 const baseOptions = (filename: string) =>
@@ -14,8 +15,10 @@ const baseOptions = (filename: string) =>
   }) as const
 
 const openClients: Array<{ close: () => Promise<void> }> = []
+const openRuntimes: Array<{ dispose: () => Promise<void> }> = []
 const openDatabases: Array<Database> = []
 const createdPaths = new Set<string>()
+const createdDirectories = new Set<string>()
 
 const queryGet = <TRow>(
   db: Database,
@@ -27,6 +30,9 @@ afterEach(async () => {
   while (openClients.length > 0) {
     await openClients.pop()!.close()
   }
+  while (openRuntimes.length > 0) {
+    await openRuntimes.pop()!.dispose()
+  }
   while (openDatabases.length > 0) {
     openDatabases.pop()!.close()
   }
@@ -35,7 +41,11 @@ afterEach(async () => {
     rmSync(`${path}-shm`, { force: true })
     rmSync(`${path}-wal`, { force: true })
   }
+  for (const directory of createdDirectories) {
+    rmSync(directory, { recursive: true, force: true })
+  }
   createdPaths.clear()
+  createdDirectories.clear()
 })
 
 describe("Memory", () => {
@@ -81,6 +91,63 @@ describe("Memory", () => {
 
     await memory.reset()
     expect((await memory.getAll({ namespace: "beta" })).length).toBe(0)
+  })
+
+  test("bootstraps migrations and parent directories for direct Effect runtime usage", async () => {
+    const root = join(process.cwd(), `.tmp-fraction-runtime-${Date.now()}`)
+    const filename = join(root, "nested", "effect-runtime.sqlite")
+    createdDirectories.add(root)
+
+    const runtime = createFractionRuntime({
+      filename,
+      defaultNamespace: "effect-runtime",
+      compressorType: "heuristic"
+    })
+    openRuntimes.push(runtime)
+
+    const record = await runtime.runPromise(
+      MemoryService.use((memory) =>
+        memory.add("Effect runtime writes work on a fresh database.", {
+          namespace: "effect-runtime"
+        })
+      )
+    )
+
+    const results = await runtime.runPromise(
+      MemoryService.use((memory) =>
+        memory.search("fresh database", {
+          namespace: "effect-runtime"
+        })
+      )
+    )
+
+    expect(existsSync(join(root, "nested"))).toBeTrue()
+    expect(existsSync(filename)).toBeTrue()
+    expect(record.content.length).toBeGreaterThan(0)
+    expect(results.some((result) => result.memory.id === record.id)).toBeTrue()
+  })
+
+  test("creates parent directories before opening nested sqlite paths", async () => {
+    const root = join(process.cwd(), `.tmp-fraction-open-${Date.now()}`)
+    const filename = join(root, "app", "memory.sqlite")
+    createdDirectories.add(root)
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "nested-open",
+      compressorType: "heuristic"
+    })
+    openClients.push(memory)
+
+    await memory.add("Nested sqlite paths now work without manual mkdir.", {
+      namespace: "nested-open"
+    })
+
+    const results = await memory.search("manual mkdir", { namespace: "nested-open" })
+
+    expect(existsSync(join(root, "app"))).toBeTrue()
+    expect(existsSync(filename)).toBeTrue()
+    expect(results.length).toBeGreaterThan(0)
   })
 
   test("validates metadata with Effect Schema when provided", async () => {
@@ -273,6 +340,7 @@ describe("Memory", () => {
     const memory = await Memory.open({
       filename,
       defaultNamespace: "test",
+      adaptiveCompression: false,
       compressorType: "llmlingua2",
       llmlingua: {
         model: "fraction/non-existent-llmlingua-model",
@@ -289,6 +357,34 @@ describe("Memory", () => {
     expect(record.content.length).toBeLessThan(rawText.length)
   })
 
+  test("falls back to heuristic compression for addMany when llmlingua is unavailable", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-llml-batch-fallback.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "test",
+      adaptiveCompression: false,
+      compressorType: "llmlingua2",
+      llmlingua: {
+        model: "fraction/non-existent-llmlingua-model",
+        onUnavailable: "fallback-heuristic"
+      }
+    })
+    openClients.push(memory)
+
+    const records = await memory.addMany(
+      [
+        "Avery is coordinating the quarterly planning review with Jordan and Priya in Singapore next Tuesday.",
+        "Jordan also needs to circulate the updated board memo before the meeting."
+      ],
+      { namespace: "test" }
+    )
+
+    expect(records.length).toBe(2)
+    expect(records.every((record) => record.content.length > 0)).toBeTrue()
+  })
+
   test("errors when llmlingua is unavailable and fallback is disabled", async () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-llml-error.sqlite`)
     createdPaths.add(filename)
@@ -296,6 +392,7 @@ describe("Memory", () => {
     const memory = await Memory.open({
       filename,
       defaultNamespace: "test",
+      adaptiveCompression: false,
       compressorType: "llmlingua2",
       llmlingua: {
         model: "fraction/non-existent-llmlingua-model",
@@ -308,6 +405,38 @@ describe("Memory", () => {
     try {
       await memory.add(
         "The operations review for Fraction is scheduled with Maya, Ravi, and Ken next Thursday, and they need to finalize the Singapore travel plan before finance approval."
+      )
+    } catch {
+      didThrow = true
+    }
+
+    expect(didThrow).toBeTrue()
+  })
+
+  test("errors for addMany when llmlingua is unavailable and fallback is disabled", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-llml-batch-error.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open({
+      filename,
+      defaultNamespace: "test",
+      adaptiveCompression: false,
+      compressorType: "llmlingua2",
+      llmlingua: {
+        model: "fraction/non-existent-llmlingua-model",
+        onUnavailable: "error"
+      }
+    })
+    openClients.push(memory)
+
+    let didThrow = false
+    try {
+      await memory.addMany(
+        [
+          "The operations review for Fraction is scheduled with Maya, Ravi, and Ken next Thursday.",
+          "They need to finalize the Singapore travel plan before finance approval."
+        ],
+        { namespace: "test" }
       )
     } catch {
       didThrow = true

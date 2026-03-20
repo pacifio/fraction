@@ -1,6 +1,8 @@
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+import { Effect } from "effect"
+
 import { CompressionUnavailable } from "./errors"
 import { createLlmlingua2Compressor, prefetchLlmlinguaArtifacts } from "./llmlingua/compressor"
 import type { CompressionProvider, EmbeddingProvider, LlmlinguaConfig } from "./types"
@@ -198,81 +200,74 @@ export const createLlmlingua2CompressionProvider = (
     return compressorPromise
   }
 
-  const toResult = async (text: string) => {
-    try {
-      const compressor = await getCompressor()
-      const result = await compressor.compress(text, {
-        rate: options.rate ?? 0.6,
-        tokenToWord: options.tokenToWord,
-        forceTokens: options.forceTokens,
-        forceReserveDigit: options.forceReserveDigit,
-        dropConsecutive: options.dropConsecutive,
-        chunkEndTokens: options.chunkEndTokens
-      })
-      return {
-        content: result.content,
-        mode: "llmlingua2" as const,
-        source: "native" as const,
-        retainedRatio: result.retainedRatio,
-        tokenCountBefore: result.tokenCountBefore,
-        tokenCountAfter: result.tokenCountAfter
-      }
-    } catch (cause) {
-      if (cause instanceof CompressionUnavailable) {
-        throw cause
-      }
-      throw new CompressionUnavailable({
-        message: "LLMLingua-2 provider failed to compress text",
-        model: options.model,
-        cause
-      })
-    }
+  const providerOptions = {
+    rate: options.rate ?? 0.6,
+    tokenToWord: options.tokenToWord,
+    forceTokens: options.forceTokens,
+    forceReserveDigit: options.forceReserveDigit,
+    dropConsecutive: options.dropConsecutive,
+    chunkEndTokens: options.chunkEndTokens
   }
 
-  return {
-    compress: (text) => toResult(text),
-    compressMany: async (texts) => {
-      const compressor = await getCompressor()
-      try {
-        return Promise.all(
-          texts.map(async (text) => {
-            const result = await compressor.compress(text, {
-              rate: options.rate ?? 0.6,
-              tokenToWord: options.tokenToWord,
-              forceTokens: options.forceTokens,
-              forceReserveDigit: options.forceReserveDigit,
-              dropConsecutive: options.dropConsecutive,
-              chunkEndTokens: options.chunkEndTokens
-            })
-            return {
-              content: result.content,
-              mode: "llmlingua2" as const,
-              source: "native" as const,
-              retainedRatio: result.retainedRatio,
-              tokenCountBefore: result.tokenCountBefore,
-              tokenCountAfter: result.tokenCountAfter
-            }
-          })
-        )
-      } catch (cause) {
-        if (cause instanceof CompressionUnavailable) {
-          throw cause
-        }
-        throw new CompressionUnavailable({
-          message: "LLMLingua-2 provider failed to compress batch",
+  const toUnavailable = (message: string, cause: unknown) =>
+    cause instanceof CompressionUnavailable
+      ? cause
+      : new CompressionUnavailable({
+          message,
           model: options.model,
           cause
         })
-      }
-    },
-    close: async () => {
-      if (!compressorPromise) {
-        return
-      }
-      const compressor = await compressorPromise
-      await compressor.close()
-      compressorPromise = undefined
-    }
+
+  const toCompressionResult = (result: Awaited<ReturnType<ReturnType<typeof createLlmlingua2Compressor>["compress"]>>) => ({
+    content: result.content,
+    mode: "llmlingua2" as const,
+    source: "native" as const,
+    retainedRatio: result.retainedRatio,
+    tokenCountBefore: result.tokenCountBefore,
+    tokenCountAfter: result.tokenCountAfter
+  })
+
+  const compressEffect = (text: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        const compressor = await getCompressor()
+        const result = await compressor.compress(text, providerOptions)
+        return toCompressionResult(result)
+      },
+      catch: (cause) => toUnavailable("LLMLingua-2 provider failed to compress text", cause)
+    })
+
+  const compressManyEffect = (texts: ReadonlyArray<string>) =>
+    Effect.tryPromise({
+      try: async () => {
+        const compressor = await getCompressor()
+        const results = await Promise.all(
+          texts.map((text) => compressor.compress(text, providerOptions))
+        )
+        return results.map(toCompressionResult)
+      },
+      catch: (cause) => toUnavailable("LLMLingua-2 provider failed to compress batch", cause)
+    })
+
+  const closeEffect = () => {
+    const current = compressorPromise
+    compressorPromise = undefined
+
+    return current
+      ? Effect.tryPromise({
+          try: async () => {
+            const compressor = await current
+            await compressor.close()
+          },
+          catch: (cause) => cause
+        }).pipe(Effect.ignore)
+      : Effect.succeed(undefined)
+  }
+
+  return {
+    compress: (text) => Effect.runPromise(compressEffect(text)),
+    compressMany: (texts) => Effect.runPromise(compressManyEffect(texts)),
+    close: () => Effect.runPromise(closeEffect())
   }
 }
 

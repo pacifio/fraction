@@ -1,4 +1,6 @@
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { mkdirSync } from "node:fs"
+import { dirname } from "node:path"
 import {
   Effect,
   Exit,
@@ -379,6 +381,19 @@ const buildDirectedEntityPairs = (entityIds: ReadonlyArray<number>): Array<Direc
   }
 
   return pairs
+}
+
+const ensureSqliteParentDirectory = (filename: string) => {
+  if (!filename || filename === ":memory:" || filename.startsWith("file:")) {
+    return
+  }
+
+  const parent = dirname(filename)
+  if (!parent || parent === ".") {
+    return
+  }
+
+  mkdirSync(parent, { recursive: true })
 }
 
 export class MemoryRepo extends ServiceMap.Service<
@@ -984,6 +999,7 @@ export class CompressionService extends ServiceMap.Service<
     CompressionService,
     Effect.gen(function* () {
       const config = yield* FractionConfigRef
+      let llmlinguaProvider: ReturnType<typeof createLlmlingua2CompressionProvider> | undefined
 
       const heuristicProvider = createHeuristicCompressionProvider({
         maxFactsPerInput: config.maxFactsPerInput
@@ -1007,18 +1023,23 @@ export class CompressionService extends ServiceMap.Service<
           )
       }
 
-      const llmlinguaProvider = createLlmlingua2CompressionProvider({
-        ...config.llmlingua,
-        rate: config.compressionRate
-      })
+      const getLlmlinguaProvider = () => {
+        llmlinguaProvider ??= createLlmlingua2CompressionProvider({
+          ...config.llmlingua,
+          rate: config.compressionRate
+        })
+        return llmlinguaProvider
+      }
 
-      const primaryProvider =
-        config.compressionProvider ??
-        (config.compressorType === "off"
-          ? disabledProvider
-          : config.compressorType === "heuristic" || config.llmlingua.enabled === false
-            ? heuristicProvider
-            : llmlinguaProvider)
+      yield* Effect.addFinalizer(() => {
+        const provider = llmlinguaProvider
+        return provider
+          ? Effect.tryPromise({
+              try: () => Promise.resolve(provider.close?.()),
+              catch: () => new Error("ignore llmlingua close failure")
+            }).pipe(Effect.ignore)
+          : Effect.succeed(undefined)
+      })
 
       const executeProvider = async (
         provider: {
@@ -1059,35 +1080,53 @@ export class CompressionService extends ServiceMap.Service<
         )
       }
 
-      const runBatch = (texts: ReadonlyArray<string>) =>
+      const canFallbackFromUnavailable =
+        config.compressorType !== "off" &&
+        !config.compressionProvider &&
+        config.llmlingua.onUnavailable === "fallback-heuristic"
+
+      const toCompressionError = (cause: unknown) =>
+        cause instanceof CompressionError
+          ? cause
+          : cause instanceof CompressionUnavailable
+            ? new CompressionError({
+                message: cause.message,
+                cause: cause.cause
+              })
+            : new CompressionError({ message: "Failed to compress text", cause })
+
+      const primaryProvider =
+        config.compressionProvider ??
+        (config.compressorType === "off"
+          ? disabledProvider
+          : config.compressorType === "heuristic" || config.llmlingua.enabled === false
+            ? heuristicProvider
+            : getLlmlinguaProvider())
+
+      const runPrimaryBatch = (texts: ReadonlyArray<string>) =>
         Effect.tryPromise({
           try: async () => {
-            try {
-              const results = await executeProvider(primaryProvider, texts)
-              return results.map(normalizeResult)
-            } catch (cause) {
-              const canFallback =
-                config.compressorType !== "off" &&
-                !config.compressionProvider &&
-                config.llmlingua.onUnavailable === "fallback-heuristic"
-
-              if (cause instanceof CompressionUnavailable && canFallback) {
-                return runFallback(texts)
-              }
-
-              throw cause
-            }
+            const results = await executeProvider(primaryProvider, texts)
+            return results.map(normalizeResult)
           },
           catch: (cause) =>
-            cause instanceof CompressionError
-              ? cause
-              : cause instanceof CompressionUnavailable
-                ? new CompressionError({
-                    message: cause.message,
-                    cause: cause.cause
-                  })
-                : new CompressionError({ message: "Failed to compress text", cause })
+            cause instanceof CompressionUnavailable ? cause : toCompressionError(cause)
         })
+
+      const runHeuristicFallback = (texts: ReadonlyArray<string>) =>
+        Effect.tryPromise({
+          try: () => runFallback(texts),
+          catch: toCompressionError
+        })
+
+      const runBatch = (texts: ReadonlyArray<string>) =>
+        runPrimaryBatch(texts).pipe(
+          Effect.catchTag("CompressionUnavailable", (error) =>
+            canFallbackFromUnavailable
+              ? runHeuristicFallback(texts)
+              : Effect.fail(toCompressionError(error))
+          )
+        )
 
       const resolver = RequestResolver.make<CompressTextRequest>((entries) =>
         runBatch(entries.map((entry) => entry.request.text)).pipe(
@@ -1756,11 +1795,15 @@ export const parseConfig = (input: FractionConfigInput | undefined): FractionCon
 
 export const createFractionLayer = (input?: FractionConfigInput) => {
   const config = parseConfig(input)
+  ensureSqliteParentDirectory(config.filename)
   const infraLayer = Layer.mergeAll(
     Layer.succeed(FractionConfigRef, config),
     SqliteClient.layer({ filename: config.filename, disableWAL: false })
   )
   const migrationLayer = MigrationService.layer.pipe(Layer.provide(infraLayer))
+  const runtimeBootstrapLayer = Layer.effectDiscard(
+    MigrationService.use((migration) => migration.run)
+  ).pipe(Layer.provide(migrationLayer))
   const repoLayer = MemoryRepo.layer.pipe(Layer.provide(infraLayer))
   const compressionLayer = CompressionService.layer.pipe(Layer.provide(infraLayer))
   const embeddingLayer = EmbeddingService.layer.pipe(Layer.provide(infraLayer))
@@ -1782,6 +1825,7 @@ export const createFractionLayer = (input?: FractionConfigInput) => {
 
   return Layer.mergeAll(
     infraLayer,
+    runtimeBootstrapLayer,
     migrationLayer,
     repoLayer,
     compressionLayer,

@@ -2,7 +2,6 @@ import { Layer, ManagedRuntime, Schema } from "effect"
 
 import {
   MemoryService,
-  MigrationService,
   createFractionRuntime,
   parseConfig
 } from "./internal/services"
@@ -221,7 +220,7 @@ export class Fraction {
       config,
       options?.memoMap ? { memoMap: options.memoMap } : undefined
     )
-    await runtime.runPromise(MigrationService.use((migration) => migration.run))
+    await runtime.services()
     return new FractionClientImpl<TSchema, MetadataFor<TSchema>>(
       runtime,
       config,
