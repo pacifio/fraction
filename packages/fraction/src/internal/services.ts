@@ -74,6 +74,73 @@ export class MigrationService extends ServiceMap.Service<
     MigrationService,
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
+      const ensureEntityIds = (entities: ReadonlyArray<string>) =>
+        Effect.forEach(
+          [...new Set(entities.map((entity) => entity.trim()).filter(Boolean))],
+          (entity) =>
+            Effect.gen(function* () {
+              const normalized = entity.toLowerCase()
+              yield* sql.unsafe("INSERT OR IGNORE INTO entities (normalized, name) VALUES (?, ?)", [
+                normalized,
+                entity
+              ])
+              const rows = yield* sql.unsafe<{ id: number }>(
+                "SELECT id FROM entities WHERE normalized = ?",
+                [normalized]
+              )
+              return rows[0]?.id ?? 0
+            }),
+          { concurrency: 1 }
+        )
+
+      const rebuildGraphState = () =>
+        Effect.gen(function* () {
+          const activeRows = yield* sql.unsafe<MemoryContentRow>(
+            `SELECT id, content
+             FROM memories
+             WHERE is_latest = 1 AND forgotten_at IS NULL
+             ORDER BY updated_at DESC`
+          )
+
+          if (activeRows.length === 0) {
+            return
+          }
+
+          yield* sql.unsafe("DELETE FROM memory_entity_edges")
+          yield* sql.unsafe("DELETE FROM entity_edges")
+          yield* sql.unsafe("DELETE FROM memory_entities")
+          yield* sql.unsafe("DELETE FROM entities")
+
+          for (const row of activeRows) {
+            const entities = [...new Set(extractEntities(row.content).map((entity) => entity.trim()).filter(Boolean))]
+            const entityIds = [...new Set((yield* ensureEntityIds(entities)).filter((id) => id > 0))]
+
+            for (const entityId of entityIds) {
+              yield* sql.unsafe(
+                "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                [row.id, entityId]
+              )
+            }
+
+            const pairs = buildDirectedEntityPairs(entityIds)
+            for (const pair of pairs) {
+              yield* sql.unsafe(
+                `INSERT OR REPLACE INTO memory_entity_edges
+                 (memory_id, source_entity_id, target_entity_id, weight)
+                 VALUES (?, ?, ?, ?)`,
+                [row.id, pair.sourceEntityId, pair.targetEntityId, pair.weight]
+              )
+              yield* sql.unsafe(
+                `INSERT INTO entity_edges (source_entity_id, target_entity_id, weight)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT(source_entity_id, target_entity_id)
+                 DO UPDATE SET weight = weight + excluded.weight`,
+                [pair.sourceEntityId, pair.targetEntityId, pair.weight]
+              )
+            }
+          }
+        })
+
       return MigrationService.of({
         run: sql
           .withTransaction(
@@ -138,12 +205,30 @@ export class MigrationService extends ServiceMap.Service<
             entity_id INTEGER NOT NULL,
             PRIMARY KEY(memory_id, entity_id)
           )`
+              yield* sql`CREATE TABLE IF NOT EXISTS memory_entity_edges (
+            memory_id TEXT NOT NULL,
+            source_entity_id INTEGER NOT NULL,
+            target_entity_id INTEGER NOT NULL,
+            weight INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(memory_id, source_entity_id, target_entity_id)
+          )`
+              yield* sql`CREATE INDEX IF NOT EXISTS memory_entity_edges_memory_idx ON memory_entity_edges(memory_id)`
               yield* sql`CREATE TABLE IF NOT EXISTS entity_edges (
             source_entity_id INTEGER NOT NULL,
             target_entity_id INTEGER NOT NULL,
             weight INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(source_entity_id, target_entity_id)
           )`
+
+              const provenanceRows = yield* sql.unsafe<{ count: number }>(
+                "SELECT COUNT(*) AS count FROM memory_entity_edges"
+              )
+              const activeRows = yield* sql.unsafe<{ count: number }>(
+                "SELECT COUNT(*) AS count FROM memories WHERE is_latest = 1 AND forgotten_at IS NULL"
+              )
+              if ((provenanceRows[0]?.count ?? 0) === 0 && (activeRows[0]?.count ?? 0) > 0) {
+                yield* rebuildGraphState()
+              }
             })
           )
           .pipe(
@@ -179,6 +264,28 @@ type HistoryRow = {
   event: HistoryEvent["event"]
   content: string
   created_at: string
+}
+
+type MemoryContentRow = {
+  id: string
+  content: string
+}
+
+type EntityIdRow = {
+  entity_id: number
+}
+
+type GraphContributionRow = {
+  memory_id: string
+  source_entity_id: number
+  target_entity_id: number
+  weight: number
+}
+
+type DirectedEntityPair = {
+  sourceEntityId: number
+  targetEntityId: number
+  weight: number
 }
 
 const toOptionalFields = (fields: {
@@ -258,6 +365,22 @@ const applyScopeClause = (scope: Scope) =>
     ]
   ] as const
 
+const buildDirectedEntityPairs = (entityIds: ReadonlyArray<number>): Array<DirectedEntityPair> => {
+  const uniqueIds = [...new Set(entityIds)].sort((left, right) => left - right)
+  const pairs: Array<DirectedEntityPair> = []
+
+  for (let left = 0; left < uniqueIds.length; left++) {
+    for (let right = left + 1; right < uniqueIds.length; right++) {
+      const source = uniqueIds[left]!
+      const target = uniqueIds[right]!
+      pairs.push({ sourceEntityId: source, targetEntityId: target, weight: 1 })
+      pairs.push({ sourceEntityId: target, targetEntityId: source, weight: 1 })
+    }
+  }
+
+  return pairs
+}
+
 export class MemoryRepo extends ServiceMap.Service<
   MemoryRepo,
   {
@@ -282,17 +405,20 @@ export class MemoryRepo extends ServiceMap.Service<
     readonly searchLexical: (
       query: string,
       scope: Scope,
-      limit: number
+      limit: number,
+      allowedIds?: ReadonlyArray<string>
     ) => Effect.Effect<ReadonlyArray<{ readonly id: string; readonly score: number }>, StorageError>
     readonly embeddings: (
-      scope: Scope
+      scope: Scope,
+      allowedIds?: ReadonlyArray<string>
     ) => Effect.Effect<
       ReadonlyArray<{ readonly id: string; readonly vector: Float32Array }>,
       StorageError
     >
     readonly relatedByEntities: (
       queryEntities: ReadonlyArray<string>,
-      scope: Scope
+      scope: Scope,
+      allowedIds?: ReadonlyArray<string>
     ) => Effect.Effect<ReadonlyArray<{ readonly id: string; readonly score: number }>, StorageError>
     readonly history: (memoryId: string) => Effect.Effect<ReadonlyArray<HistoryEvent>, StorageError>
     readonly recordHistory: (event: HistoryEvent) => Effect.Effect<void, StorageError>
@@ -322,35 +448,183 @@ export class MemoryRepo extends ServiceMap.Service<
           { concurrency: 1 }
         )
 
-      const storeEntities = (memoryId: string, entities: ReadonlyArray<string>) =>
+      const storeGraphState = (memoryId: string, entities: ReadonlyArray<string>) =>
         Effect.gen(function* () {
-          const ids = (yield* ensureEntityIds(entities)).filter((id) => id > 0)
+          const ids = [...new Set((yield* ensureEntityIds(entities)).filter((id) => id > 0))]
           for (const entityId of ids) {
             yield* sql.unsafe(
               "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
               [memoryId, entityId]
             )
           }
-          for (let left = 0; left < ids.length; left++) {
-            for (let right = left + 1; right < ids.length; right++) {
-              const source = ids[left]!
-              const target = ids[right]!
-              yield* sql.unsafe(
-                `INSERT INTO entity_edges (source_entity_id, target_entity_id, weight)
-                 VALUES (?, ?, 1)
-                 ON CONFLICT(source_entity_id, target_entity_id)
-                 DO UPDATE SET weight = weight + 1`,
-                [source, target]
-              )
-              yield* sql.unsafe(
-                `INSERT INTO entity_edges (source_entity_id, target_entity_id, weight)
-                 VALUES (?, ?, 1)
-                 ON CONFLICT(source_entity_id, target_entity_id)
-                 DO UPDATE SET weight = weight + 1`,
-                [target, source]
-              )
+
+          const pairs = buildDirectedEntityPairs(ids)
+          for (const pair of pairs) {
+            yield* sql.unsafe(
+              `INSERT OR REPLACE INTO memory_entity_edges
+               (memory_id, source_entity_id, target_entity_id, weight)
+               VALUES (?, ?, ?, ?)`,
+              [memoryId, pair.sourceEntityId, pair.targetEntityId, pair.weight]
+            )
+            yield* sql.unsafe(
+              `INSERT INTO entity_edges (source_entity_id, target_entity_id, weight)
+               VALUES (?, ?, ?)
+               ON CONFLICT(source_entity_id, target_entity_id)
+               DO UPDATE SET weight = weight + excluded.weight`,
+              [pair.sourceEntityId, pair.targetEntityId, pair.weight]
+            )
+          }
+        })
+
+      const loadGraphContributions = (memoryIds: ReadonlyArray<string>) => {
+        if (memoryIds.length === 0) {
+          return Effect.succeed([] as ReadonlyArray<GraphContributionRow>)
+        }
+        const placeholders = memoryIds.map(() => "?").join(",")
+        return sql.unsafe<GraphContributionRow>(
+          `SELECT memory_id, source_entity_id, target_entity_id, weight
+           FROM memory_entity_edges
+           WHERE memory_id IN (${placeholders})`,
+          memoryIds
+        )
+      }
+
+      const pruneOrphanEntities = (entityIds?: ReadonlyArray<number>) =>
+        Effect.gen(function* () {
+          if (entityIds && entityIds.length > 0) {
+            const placeholders = entityIds.map(() => "?").join(",")
+            yield* sql.unsafe(
+              `DELETE FROM entities
+               WHERE id IN (${placeholders})
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM memory_entities
+                   WHERE memory_entities.entity_id = entities.id
+                 )`,
+              entityIds
+            )
+          } else {
+            yield* sql.unsafe(
+              `DELETE FROM entities
+               WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM memory_entities
+                 WHERE memory_entities.entity_id = entities.id
+               )`
+            )
+          }
+
+          yield* sql.unsafe(
+            `DELETE FROM entity_edges
+             WHERE weight <= 0
+               OR source_entity_id NOT IN (SELECT id FROM entities)
+               OR target_entity_id NOT IN (SELECT id FROM entities)`
+          )
+        })
+
+      const removeGraphContributions = (memoryIds: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          if (memoryIds.length === 0) {
+            return
+          }
+
+          const placeholders = memoryIds.map(() => "?").join(",")
+          const contributions = yield* loadGraphContributions(memoryIds)
+          const affectedEntityRows = yield* sql.unsafe<EntityIdRow>(
+            `SELECT DISTINCT entity_id
+             FROM memory_entities
+             WHERE memory_id IN (${placeholders})`,
+            memoryIds
+          )
+
+          const aggregated = new Map<string, DirectedEntityPair>()
+          for (const contribution of contributions) {
+            const key = `${contribution.source_entity_id}:${contribution.target_entity_id}`
+            const existing = aggregated.get(key)
+            if (existing) {
+              existing.weight += contribution.weight
+            } else {
+              aggregated.set(key, {
+                sourceEntityId: contribution.source_entity_id,
+                targetEntityId: contribution.target_entity_id,
+                weight: contribution.weight
+              })
             }
           }
+
+          for (const pair of aggregated.values()) {
+            yield* sql.unsafe(
+              `UPDATE entity_edges
+               SET weight = weight - ?
+               WHERE source_entity_id = ? AND target_entity_id = ?`,
+              [pair.weight, pair.sourceEntityId, pair.targetEntityId]
+            )
+          }
+
+          yield* sql.unsafe(
+            `DELETE FROM memory_entity_edges WHERE memory_id IN (${placeholders})`,
+            memoryIds
+          )
+          yield* sql.unsafe(`DELETE FROM memory_entities WHERE memory_id IN (${placeholders})`, memoryIds)
+
+          yield* pruneOrphanEntities(affectedEntityRows.map((row) => row.entity_id))
+        })
+
+      const insertRecord = (
+        record: MemoryRecord,
+        embedding: Float32Array,
+        entities: ReadonlyArray<string>
+      ) =>
+        Effect.gen(function* () {
+          yield* sql.unsafe(
+            `INSERT INTO memories
+          (id, root_id, parent_id, version, content, raw_content, metadata_json, scope_json, namespace, user_id, agent_id, run_id, app_id, content_hash, event_at, created_at, updated_at, forgotten_at, is_latest)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              record.id,
+              record.rootId,
+              record.parentId ?? null,
+              record.version,
+              record.content,
+              record.rawContent,
+              JSON.stringify(record.metadata),
+              scopeToJson(record.scope),
+              record.scope.namespace ?? null,
+              record.scope.userId ?? null,
+              record.scope.agentId ?? null,
+              record.scope.runId ?? null,
+              record.scope.appId ?? null,
+              hashText(record.content),
+              record.eventAt ?? null,
+              record.createdAt,
+              record.updatedAt,
+              record.forgottenAt ?? null,
+              record.isLatest ? 1 : 0
+            ]
+          )
+          yield* sql.unsafe(
+            `INSERT INTO memory_versions (id, root_id, parent_id, memory_id, version, content, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              makeMemoryId(),
+              record.rootId,
+              record.parentId ?? null,
+              record.id,
+              record.version,
+              record.content,
+              record.createdAt
+            ]
+          )
+          yield* sql.unsafe(
+            `INSERT INTO memory_embeddings (memory_id, vector, dimensions) VALUES (?, ?, ?)`,
+            [record.id, encodeVector(embedding), embedding.length]
+          )
+          yield* sql.unsafe(`INSERT INTO memory_fts (id, content, raw_content) VALUES (?, ?, ?)`, [
+            record.id,
+            record.content,
+            record.rawContent
+          ])
+          yield* storeGraphState(record.id, entities)
         })
 
       const insert = (
@@ -361,54 +635,7 @@ export class MemoryRepo extends ServiceMap.Service<
         sql
           .withTransaction(
             Effect.gen(function* () {
-              yield* sql.unsafe(
-                `INSERT INTO memories
-            (id, root_id, parent_id, version, content, raw_content, metadata_json, scope_json, namespace, user_id, agent_id, run_id, app_id, content_hash, event_at, created_at, updated_at, forgotten_at, is_latest)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  record.id,
-                  record.rootId,
-                  record.parentId ?? null,
-                  record.version,
-                  record.content,
-                  record.rawContent,
-                  JSON.stringify(record.metadata),
-                  scopeToJson(record.scope),
-                  record.scope.namespace ?? null,
-                  record.scope.userId ?? null,
-                  record.scope.agentId ?? null,
-                  record.scope.runId ?? null,
-                  record.scope.appId ?? null,
-                  hashText(record.content),
-                  record.eventAt ?? null,
-                  record.createdAt,
-                  record.updatedAt,
-                  record.forgottenAt ?? null,
-                  record.isLatest ? 1 : 0
-                ]
-              )
-              yield* sql.unsafe(
-                `INSERT INTO memory_versions (id, root_id, parent_id, memory_id, version, content, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  makeMemoryId(),
-                  record.rootId,
-                  record.parentId ?? null,
-                  record.id,
-                  record.version,
-                  record.content,
-                  record.createdAt
-                ]
-              )
-              yield* sql.unsafe(
-                `INSERT INTO memory_embeddings (memory_id, vector, dimensions) VALUES (?, ?, ?)`,
-                [record.id, encodeVector(embedding), embedding.length]
-              )
-              yield* sql.unsafe(
-                `INSERT INTO memory_fts (id, content, raw_content) VALUES (?, ?, ?)`,
-                [record.id, record.content, record.rawContent]
-              )
-              yield* storeEntities(record.id, entities)
+              yield* insertRecord(record, embedding, entities)
             })
           )
           .pipe(
@@ -430,7 +657,8 @@ export class MemoryRepo extends ServiceMap.Service<
                 next.updatedAt,
                 previous.id
               ])
-              yield* insert(next, embedding, entities)
+              yield* removeGraphContributions([previous.id])
+              yield* insertRecord(next, embedding, entities)
             })
           )
           .pipe(
@@ -503,21 +731,7 @@ export class MemoryRepo extends ServiceMap.Service<
           if (ids.length === 0) {
             return
           }
-          const placeholders = ids.map(() => "?").join(",")
-          yield* sql.withTransaction(
-            Effect.gen(function* () {
-              yield* sql.unsafe(
-                `DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`,
-                ids
-              )
-              yield* sql.unsafe(`DELETE FROM memory_fts WHERE id IN (${placeholders})`, ids)
-              yield* sql.unsafe(
-                `DELETE FROM memory_entities WHERE memory_id IN (${placeholders})`,
-                ids
-              )
-              yield* sql.unsafe(`DELETE FROM memories WHERE id IN (${placeholders})`, ids)
-            })
-          )
+          yield* deleteByIds(ids)
         }).pipe(
           Effect.mapError(
             (cause) => new StorageError({ message: "Failed to delete memory chain", cause })
@@ -531,15 +745,12 @@ export class MemoryRepo extends ServiceMap.Service<
         const placeholders = ids.map(() => "?").join(",")
         return sql.withTransaction(
           Effect.gen(function* () {
+            yield* removeGraphContributions(ids)
             yield* sql.unsafe(
               `DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`,
               ids
             )
             yield* sql.unsafe(`DELETE FROM memory_fts WHERE id IN (${placeholders})`, ids)
-            yield* sql.unsafe(
-              `DELETE FROM memory_entities WHERE memory_id IN (${placeholders})`,
-              ids
-            )
             yield* sql.unsafe(
               `DELETE FROM memory_versions WHERE memory_id IN (${placeholders})`,
               ids
@@ -574,6 +785,7 @@ export class MemoryRepo extends ServiceMap.Service<
           Effect.gen(function* () {
             yield* sql.unsafe("DELETE FROM memory_embeddings")
             yield* sql.unsafe("DELETE FROM memory_fts")
+            yield* sql.unsafe("DELETE FROM memory_entity_edges")
             yield* sql.unsafe("DELETE FROM memory_entities")
             yield* sql.unsafe("DELETE FROM entity_edges")
             yield* sql.unsafe("DELETE FROM entities")
@@ -588,24 +800,35 @@ export class MemoryRepo extends ServiceMap.Service<
           )
         )
 
-      const searchLexical = (query: string, scope: Scope, limit: number) => {
+      const searchLexical = (
+        query: string,
+        scope: Scope,
+        limit: number,
+        allowedIds?: ReadonlyArray<string>
+      ) => {
         const [clause, params] = applyScopeClause(scope)
         const tokens = query.match(/[A-Za-z0-9_]+/g) ?? []
-        if (tokens.length === 0) {
+        if (tokens.length === 0 || (allowedIds && allowedIds.length === 0)) {
           return Effect.succeed(
             [] as ReadonlyArray<{ readonly id: string; readonly score: number }>
           )
         }
         const q = tokens.map((token) => `"${token}"`).join(" OR ")
+        const allowedClause =
+          allowedIds && allowedIds.length > 0
+            ? ` AND memories.id IN (${allowedIds.map(() => "?").join(",")})`
+            : ""
         return sql
           .unsafe<{ id: string; score: number }>(
             `SELECT fts.id AS id, bm25(memory_fts) AS score
            FROM memory_fts AS fts
            JOIN memories AS memories ON memories.id = fts.id
-           WHERE memory_fts MATCH ? AND ${clause} AND memories.is_latest = 1 AND memories.forgotten_at IS NULL
+           WHERE memory_fts MATCH ? AND ${clause} AND memories.is_latest = 1 AND memories.forgotten_at IS NULL${allowedClause}
            ORDER BY bm25(memory_fts) ASC
            LIMIT ?`,
-            [q, ...params, limit]
+            allowedIds && allowedIds.length > 0
+              ? [q, ...params, ...allowedIds, limit]
+              : [q, ...params, limit]
           )
           .pipe(
             Effect.map((rows) =>
@@ -620,15 +843,24 @@ export class MemoryRepo extends ServiceMap.Service<
           )
       }
 
-      const embeddings = (scope: Scope) => {
+      const embeddings = (scope: Scope, allowedIds?: ReadonlyArray<string>) => {
         const [clause, params] = applyScopeClause(scope)
+        if (allowedIds && allowedIds.length === 0) {
+          return Effect.succeed(
+            [] as ReadonlyArray<{ readonly id: string; readonly vector: Float32Array }>
+          )
+        }
+        const allowedClause =
+          allowedIds && allowedIds.length > 0
+            ? ` AND memories.id IN (${allowedIds.map(() => "?").join(",")})`
+            : ""
         return sql
           .unsafe<{ id: string; vector: Uint8Array }>(
             `SELECT memories.id AS id, memory_embeddings.vector AS vector
            FROM memories
            JOIN memory_embeddings ON memory_embeddings.memory_id = memories.id
-           WHERE ${clause} AND memories.is_latest = 1 AND memories.forgotten_at IS NULL`,
-            params
+           WHERE ${clause} AND memories.is_latest = 1 AND memories.forgotten_at IS NULL${allowedClause}`,
+            allowedIds && allowedIds.length > 0 ? [...params, ...allowedIds] : params
           )
           .pipe(
             Effect.map((rows) =>
@@ -640,8 +872,12 @@ export class MemoryRepo extends ServiceMap.Service<
           )
       }
 
-      const relatedByEntities = (queryEntities: ReadonlyArray<string>, scope: Scope) => {
-        if (queryEntities.length === 0) {
+      const relatedByEntities = (
+        queryEntities: ReadonlyArray<string>,
+        scope: Scope,
+        allowedIds?: ReadonlyArray<string>
+      ) => {
+        if (queryEntities.length === 0 || (allowedIds && allowedIds.length === 0)) {
           return Effect.succeed(
             [] as ReadonlyArray<{ readonly id: string; readonly score: number }>
           )
@@ -649,6 +885,10 @@ export class MemoryRepo extends ServiceMap.Service<
         const normalized = queryEntities.map((entity) => entity.toLowerCase())
         const placeholders = normalized.map(() => "?").join(",")
         const [clause, params] = applyScopeClause(scope)
+        const allowedClause =
+          allowedIds && allowedIds.length > 0
+            ? ` AND memories.id IN (${allowedIds.map(() => "?").join(",")})`
+            : ""
         return sql
           .unsafe<{ id: string; score: number }>(
             `SELECT DISTINCT memories.id AS id, COALESCE(SUM(entity_edges.weight), 1) AS score
@@ -656,10 +896,12 @@ export class MemoryRepo extends ServiceMap.Service<
            JOIN memory_entities ON memory_entities.memory_id = memories.id
            JOIN entities ON entities.id = memory_entities.entity_id
            LEFT JOIN entity_edges ON entity_edges.source_entity_id = entities.id
-           WHERE entities.normalized IN (${placeholders}) AND ${clause} AND memories.is_latest = 1 AND memories.forgotten_at IS NULL
+           WHERE entities.normalized IN (${placeholders}) AND ${clause} AND memories.is_latest = 1 AND memories.forgotten_at IS NULL${allowedClause}
            GROUP BY memories.id
            ORDER BY score DESC`,
-            [...normalized, ...params]
+            allowedIds && allowedIds.length > 0
+              ? [...normalized, ...params, ...allowedIds]
+              : [...normalized, ...params]
           )
           .pipe(
             Effect.mapError((cause) => new StorageError({ message: "Failed graph search", cause }))
@@ -1056,13 +1298,21 @@ export class RetrievalService extends ServiceMap.Service<
           const filtered = active.filter((memory) =>
             matchesFilter(memory.metadata as JsonRecord, filter)
           )
+          if (filter && filtered.length === 0) {
+            return [] as ReadonlyArray<SearchResult>
+          }
+          const allowedIds = filter ? filtered.map((memory) => memory.id) : undefined
           const queryVector = yield* embeddings.embed(query)
-          const vectorRanking = (yield* repo.embeddings(scope))
+          const vectorRanking = (yield* repo.embeddings(scope, allowedIds))
             .map((entry) => ({ id: entry.id, score: cosineSimilarity(queryVector, entry.vector) }))
             .sort((left, right) => right.score - left.score)
             .slice(0, limit * 3)
-          const lexicalRanking = yield* repo.searchLexical(query, scope, limit * 3)
-          const graphRanking = yield* repo.relatedByEntities(extractEntities(query), scope)
+          const lexicalRanking = yield* repo.searchLexical(query, scope, limit * 3, allowedIds)
+          const graphRanking = yield* repo.relatedByEntities(
+            extractEntities(query),
+            scope,
+            allowedIds
+          )
           const queryTime = extractEventAt(query)
           const temporalRanking = queryTime
             ? filtered

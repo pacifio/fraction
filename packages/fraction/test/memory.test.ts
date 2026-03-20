@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { rmSync } from "node:fs"
 import { join } from "node:path"
 import { Schema } from "effect"
@@ -13,11 +14,21 @@ const baseOptions = (filename: string) =>
   }) as const
 
 const openClients: Array<{ close: () => Promise<void> }> = []
+const openDatabases: Array<Database> = []
 const createdPaths = new Set<string>()
+
+const queryGet = <TRow>(
+  db: Database,
+  sql: string,
+  params: ReadonlyArray<string | number> = []
+) => db.query(sql).get(...params) as TRow | null
 
 afterEach(async () => {
   while (openClients.length > 0) {
     await openClients.pop()!.close()
+  }
+  while (openDatabases.length > 0) {
+    openDatabases.pop()!.close()
   }
   for (const path of createdPaths) {
     rmSync(path, { force: true })
@@ -371,5 +382,168 @@ describe("Memory", () => {
     expect(batchCalls.length).toBe(1)
     expect(batchCalls[0]?.length).toBe(2)
     expect(singleCalls).toBe(0)
+  })
+
+  test("applies metadata filters before truncating retrieval candidates", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-filtered-retrieval.sqlite`)
+    createdPaths.add(filename)
+
+    const embed = (text: string) =>
+      text === "common"
+        ? Float32Array.from([1, 0, 0, 0])
+        : text.includes("rare-signal")
+          ? Float32Array.from([0, 1, 0, 0])
+          : Float32Array.from([1, 0, 0, 0])
+
+    const memory = await Memory.open({
+      ...baseOptions(filename),
+      embeddingProvider: {
+        embed,
+        embedMany: (texts) => texts.map((text) => embed(text))
+      }
+    })
+    openClients.push(memory)
+
+    for (let index = 0; index < 5; index++) {
+      await memory.add(`common common common filler-${index}`, { namespace: "test" }, {
+        topic: "other"
+      })
+    }
+
+    const matching = await memory.add("common rare-signal", { namespace: "test" }, {
+      topic: "keep"
+    })
+
+    const results = await memory.search(
+      "common",
+      { namespace: "test" },
+      {
+        limit: 1,
+        filter: {
+          op: "eq",
+          field: "topic",
+          value: "keep"
+        }
+      }
+    )
+
+    expect(results.length).toBe(1)
+    expect(results[0]?.memory.id).toBe(matching.id)
+  })
+
+  test("hard delete removes full chain rows and decrements shared graph edges", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-delete-graph.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open(baseOptions(filename))
+    openClients.push(memory)
+
+    await memory.add("Alice met Bob in London.", { namespace: "test" })
+    const original = await memory.add("Alice met Bob in Paris.", { namespace: "test" })
+    const updated = await memory.update(original.id, "Alice met Bob in Paris on Friday.")
+
+    const db = new Database(filename, { readonly: true })
+    openDatabases.push(db)
+
+    const beforeDelete = queryGet<{ weight: number }>(
+      db,
+      `SELECT entity_edges.weight AS weight
+       FROM entity_edges
+       JOIN entities AS source ON source.id = entity_edges.source_entity_id
+       JOIN entities AS target ON target.id = entity_edges.target_entity_id
+       WHERE source.normalized = ? AND target.normalized = ?`,
+      ["alice", "bob"]
+    )
+    expect(beforeDelete?.weight).toBe(2)
+
+    await memory.delete(updated.id)
+
+    const rootCounts = queryGet<{
+      memoryCount: number
+      versionCount: number
+      historyCount: number
+    }>(
+      db,
+      `SELECT
+         (SELECT COUNT(*) FROM memories WHERE root_id = ?) AS memoryCount,
+         (SELECT COUNT(*) FROM memory_versions WHERE root_id = ?) AS versionCount,
+         (SELECT COUNT(*) FROM memory_history WHERE root_id = ?) AS historyCount`,
+      [original.rootId, original.rootId, original.rootId]
+    )
+
+    expect(rootCounts?.memoryCount).toBe(0)
+    expect(rootCounts?.versionCount).toBe(0)
+    expect(rootCounts?.historyCount).toBe(0)
+
+    const afterDelete = queryGet<{ weight: number }>(
+      db,
+      `SELECT entity_edges.weight AS weight
+       FROM entity_edges
+       JOIN entities AS source ON source.id = entity_edges.source_entity_id
+       JOIN entities AS target ON target.id = entity_edges.target_entity_id
+       WHERE source.normalized = ? AND target.normalized = ?`,
+      ["alice", "bob"]
+    )
+    expect(afterDelete?.weight).toBe(1)
+
+    const parisEntity = queryGet<{ normalized: string }>(
+      db,
+      "SELECT normalized FROM entities WHERE normalized = ?",
+      ["paris"]
+    )
+    expect(parisEntity).toBeNull()
+  })
+
+  test("update removes previous graph state and keeps only the latest version in graph tables", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-update-graph.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open(baseOptions(filename))
+    openClients.push(memory)
+
+    const original = await memory.add("Alice met Bob in Paris.", { namespace: "test" })
+    const updated = await memory.update(original.id, "Alice met Carol in Rome.")
+
+    const db = new Database(filename, { readonly: true })
+    openDatabases.push(db)
+
+    const originalGraphRows = queryGet<{ count: number }>(
+      db,
+      "SELECT COUNT(*) AS count FROM memory_entities WHERE memory_id = ?",
+      [original.id]
+    )
+    expect(originalGraphRows?.count).toBe(0)
+
+    const originalEdgeRows = queryGet<{ count: number }>(
+      db,
+      "SELECT COUNT(*) AS count FROM memory_entity_edges WHERE memory_id = ?",
+      [original.id]
+    )
+    expect(originalEdgeRows?.count).toBe(0)
+
+    const updatedGraphRows = queryGet<{ count: number }>(
+      db,
+      "SELECT COUNT(*) AS count FROM memory_entities WHERE memory_id = ?",
+      [updated.id]
+    )
+    expect(updatedGraphRows?.count).toBeGreaterThan(0)
+
+    const bobEntity = queryGet<{ normalized: string }>(
+      db,
+      "SELECT normalized FROM entities WHERE normalized = ?",
+      ["bob"]
+    )
+    expect(bobEntity).toBeNull()
+
+    const aliceCarolEdge = queryGet<{ weight: number }>(
+      db,
+      `SELECT entity_edges.weight AS weight
+       FROM entity_edges
+       JOIN entities AS source ON source.id = entity_edges.source_entity_id
+       JOIN entities AS target ON target.id = entity_edges.target_entity_id
+       WHERE source.normalized = ? AND target.normalized = ?`,
+      ["alice", "carol"]
+    )
+    expect(aliceCarolEdge?.weight).toBe(1)
   })
 })
