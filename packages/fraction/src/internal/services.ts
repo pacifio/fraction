@@ -720,11 +720,16 @@ export class MemoryRepo extends ServiceMap.Service<
 
       const forget = (id: string, forgottenAt: string) =>
         sql
-          .unsafe("UPDATE memories SET forgotten_at = ?, updated_at = ? WHERE id = ?", [
-            forgottenAt,
-            forgottenAt,
-            id
-          ])
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* removeGraphContributions([id])
+              yield* sql.unsafe("UPDATE memories SET forgotten_at = ?, updated_at = ? WHERE id = ?", [
+                forgottenAt,
+                forgottenAt,
+                id
+              ])
+            })
+          )
           .pipe(
             Effect.asVoid,
             Effect.mapError(
@@ -1544,6 +1549,36 @@ export class MemoryService extends ServiceMap.Service<
           createdAt: nowIso()
         } as HistoryEvent)
 
+      const findDuplicate = (
+        existing: ReadonlyArray<MemoryRecord>,
+        embeddingsById: ReadonlyMap<string, Float32Array>,
+        content: string,
+        embedding: Float32Array
+      ) => {
+        const contentHash = hashText(content)
+        const exactDuplicate = existing.find((memory) => hashText(memory.content) === contentHash)
+        if (exactDuplicate) {
+          return exactDuplicate
+        }
+
+        let bestMatch: MemoryRecord | undefined
+        let bestScore = Number.NEGATIVE_INFINITY
+        for (const memory of existing) {
+          const existingEmbedding = embeddingsById.get(memory.id)
+          if (!existingEmbedding) {
+            continue
+          }
+
+          const score = cosineSimilarity(embedding, existingEmbedding)
+          if (score >= config.duplicateSimilarity && score > bestScore) {
+            bestMatch = memory
+            bestScore = score
+          }
+        }
+
+        return bestMatch
+      }
+
       const add = (
         input:
           | string
@@ -1560,9 +1595,12 @@ export class MemoryService extends ServiceMap.Service<
           const extracted = yield* extractor.extract(compressed.content)
           const finalContent =
             extracted.content.trim().length > 0 ? extracted.content.trim() : compressed.content
-          const contentHash = hashText(finalContent)
           const existing = yield* repo.listActive(scope)
-          const duplicate = existing.find((memory) => hashText(memory.content) === contentHash)
+          const embedding = yield* embeddings.embed(finalContent)
+          const existingEmbeddings = new Map(
+            (yield* repo.embeddings(scope)).map((entry) => [entry.id, entry.vector] as const)
+          )
+          const duplicate = findDuplicate(existing, existingEmbeddings, finalContent, embedding)
           if (duplicate) {
             yield* recordHistory(duplicate.rootId, duplicate.id, "SKIP", duplicate.content)
             return duplicate
@@ -1581,7 +1619,6 @@ export class MemoryService extends ServiceMap.Service<
             eventAt: extracted.eventAt,
             isLatest: true
           })
-          const embedding = yield* embeddings.embed(record.content)
           yield* repo.insert(record, embedding, extracted.entities)
           yield* recordHistory(record.rootId, record.id, "ADD", record.content)
           return record
@@ -1604,6 +1641,9 @@ export class MemoryService extends ServiceMap.Service<
           )
           const embeddingsBatch = yield* embeddings.embedMany(finalContents)
           const active = [...(yield* repo.listActive(scope))]
+          const activeEmbeddings = new Map(
+            (yield* repo.embeddings(scope)).map((entry) => [entry.id, entry.vector] as const)
+          )
           const records: Array<MemoryRecord> = []
 
           for (let index = 0; index < inputs.length; index++) {
@@ -1612,8 +1652,7 @@ export class MemoryService extends ServiceMap.Service<
             const extraction = extracted[index]!
             const finalContent = finalContents[index]!
             const embedding = embeddingsBatch[index]!
-            const contentHash = hashText(finalContent)
-            const duplicate = active.find((memory) => hashText(memory.content) === contentHash)
+            const duplicate = findDuplicate(active, activeEmbeddings, finalContent, embedding)
 
             if (duplicate) {
               yield* recordHistory(duplicate.rootId, duplicate.id, "SKIP", duplicate.content)
@@ -1639,6 +1678,7 @@ export class MemoryService extends ServiceMap.Service<
             yield* repo.insert(record, embedding, extraction.entities)
             yield* recordHistory(record.rootId, record.id, "ADD", record.content)
             active.push(record)
+            activeEmbeddings.set(record.id, embedding)
             records.push(record)
           }
 

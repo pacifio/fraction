@@ -224,6 +224,7 @@ describe("Memory", () => {
     const batchCalls: Array<ReadonlyArray<string>> = []
     const memory = await Memory.open({
       ...baseOptions(filename),
+      duplicateSimilarity: 1.01,
       extractionProvider: {
         extract: () => ({
           content: "   ",
@@ -232,10 +233,18 @@ describe("Memory", () => {
         })
       },
       embeddingProvider: {
-        embed: (text) => Float32Array.from([text.length, 1, 0, 0]),
+        embed: (text) =>
+          Float32Array.from([text.length, text.includes("Ada") ? 1 : 0, text.includes("Linus") ? 1 : 0, 0]),
         embedMany: (texts) => {
           batchCalls.push(texts)
-          return texts.map((text) => Float32Array.from([text.length, 1, 0, 0]))
+          return texts.map((text) =>
+            Float32Array.from([
+              text.length,
+              text.includes("Ada") ? 1 : 0,
+              text.includes("Linus") ? 1 : 0,
+              0
+            ])
+          )
         }
       }
     })
@@ -598,6 +607,37 @@ describe("Memory", () => {
     expect(results[0]?.memory.id).toBe(matching.id)
   })
 
+  test("uses duplicateSimilarity to skip semantically duplicate adds and batch adds", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-duplicate-similarity.sqlite`)
+    createdPaths.add(filename)
+
+    const embed = (text: string) =>
+      text.includes("atlas")
+        ? Float32Array.from([1, 0, 0, 0])
+        : Float32Array.from([0, 1, 0, 0])
+
+    const memory = await Memory.open({
+      ...baseOptions(filename),
+      duplicateSimilarity: 0.95,
+      embeddingProvider: {
+        embed,
+        embedMany: (texts) => texts.map((text) => embed(text))
+      }
+    })
+    openClients.push(memory)
+
+    const original = await memory.add("atlas launch plan")
+    const duplicate = await memory.add("atlas launch plan!!!")
+    const batch = await memory.addMany(["atlas roadmap update", "totally different note"], {
+      namespace: "test"
+    })
+
+    expect(duplicate.id).toBe(original.id)
+    expect(batch[0]?.id).toBe(original.id)
+    expect(batch[1]?.id).not.toBe(original.id)
+    expect((await memory.getAll({ namespace: "test" })).length).toBe(2)
+  })
+
   test("hard delete removes full chain rows and decrements shared graph edges", async () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-delete-graph.sqlite`)
     createdPaths.add(filename)
@@ -659,6 +699,51 @@ describe("Memory", () => {
       ["paris"]
     )
     expect(parisEntity).toBeNull()
+  })
+
+  test("forget removes graph contributions from related memories", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-forget-graph.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Memory.open(baseOptions(filename))
+    openClients.push(memory)
+
+    const forgotten = await memory.add("Alice met Bob in Paris.", { namespace: "test" })
+    await memory.add("Alice met Bob in London.", { namespace: "test" })
+
+    const db = new Database(filename, { readonly: true })
+    openDatabases.push(db)
+
+    const beforeForget = queryGet<{ weight: number }>(
+      db,
+      `SELECT entity_edges.weight AS weight
+       FROM entity_edges
+       JOIN entities AS source ON source.id = entity_edges.source_entity_id
+       JOIN entities AS target ON target.id = entity_edges.target_entity_id
+       WHERE source.normalized = ? AND target.normalized = ?`,
+      ["alice", "bob"]
+    )
+    expect(beforeForget?.weight).toBe(2)
+
+    await memory.forget(forgotten.id)
+
+    const afterForget = queryGet<{ weight: number }>(
+      db,
+      `SELECT entity_edges.weight AS weight
+       FROM entity_edges
+       JOIN entities AS source ON source.id = entity_edges.source_entity_id
+       JOIN entities AS target ON target.id = entity_edges.target_entity_id
+       WHERE source.normalized = ? AND target.normalized = ?`,
+      ["alice", "bob"]
+    )
+    expect(afterForget?.weight).toBe(1)
+
+    const forgottenRows = queryGet<{ count: number }>(
+      db,
+      "SELECT COUNT(*) AS count FROM memory_entity_edges WHERE memory_id = ?",
+      [forgotten.id]
+    )
+    expect(forgottenRows?.count).toBe(0)
   })
 
   test("update removes previous graph state and keeps only the latest version in graph tables", async () => {
