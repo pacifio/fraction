@@ -7,7 +7,8 @@ import {
   type ChatMiddlewareContext,
   type ModelMessage,
   type ServerTool,
-  type SummarizeAdapter
+  type SummarizeAdapter,
+  type ToolExecutionContext
 } from "@tanstack/ai"
 import type { ManagedRuntime } from "effect"
 
@@ -21,9 +22,12 @@ import type {
   Scope
 } from "fraction"
 import {
+  AdapterError,
   AdapterBridgeService,
   CompressionResultSchema,
   ExtractionResultSchema,
+  MemoryNotFound,
+  type MemoryRecord,
   type SearchResult,
   MemoryService
 } from "fraction/effect"
@@ -52,6 +56,7 @@ export interface TanStackFractionMemoryOptions {
         ctx: ChatMiddlewareContext,
         config: ChatMiddlewareConfig
       ) => MaybePromise<Scope | undefined>)
+  readonly toolScope?: Scope | ((context: ToolExecutionContext) => MaybePromise<Scope | undefined>)
   readonly query?: (
     ctx: ChatMiddlewareContext,
     config: ChatMiddlewareConfig
@@ -59,6 +64,15 @@ export interface TanStackFractionMemoryOptions {
   readonly filter?: FilterExpr
   readonly recall?: RecallOptions
   readonly remember?: TanStackRememberSettings
+}
+
+export interface TanStackScopeResolverInput {
+  readonly ctx: ChatMiddlewareContext
+  readonly config: ChatMiddlewareConfig
+}
+
+export interface TanStackHelperScopeOptions {
+  readonly scopeContext?: TanStackScopeResolverInput
 }
 
 export interface TanStackExtractionProviderOptions<
@@ -104,8 +118,21 @@ const getRuntime = (memory: RuntimeLike): ManagedRuntime.ManagedRuntime<any, any
   return memory
 }
 
-const staticScope = (scope: TanStackFractionMemoryOptions["scope"]): Scope | undefined =>
-  typeof scope === "function" ? undefined : scope
+type ScopeResolver = Exclude<TanStackFractionMemoryOptions["scope"], Scope | undefined>
+type ToolScopeResolver = Exclude<TanStackFractionMemoryOptions["toolScope"], Scope | undefined>
+
+const hasDynamicScope = (
+  scope: TanStackFractionMemoryOptions["scope"]
+): scope is ScopeResolver => typeof scope === "function"
+
+const hasDynamicToolScope = (
+  scope: TanStackFractionMemoryOptions["toolScope"]
+): scope is ToolScopeResolver => typeof scope === "function"
+
+const adapterError = (message: string) =>
+  new AdapterError({
+    message
+  })
 
 const toTanStackSchema = <TSchema extends Schema.Top>(schema: TSchema) =>
   Schema.toStandardJSONSchemaV1(schema)
@@ -190,6 +217,90 @@ const resolveScope = (
   config: ChatMiddlewareConfig
 ) => (typeof options.scope === "function" ? options.scope(ctx, config) : options.scope)
 
+const resolveNormalizedScope = (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  scope: Scope | undefined
+) => runtime.runPromise(AdapterBridgeService.use((service) => service.resolveScope(scope)))
+
+const resolveHelperScope = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  options: Pick<TanStackFractionMemoryOptions, "scope">,
+  scopeContext: TanStackScopeResolverInput | undefined
+) => {
+  if (hasDynamicScope(options.scope)) {
+    if (scopeContext === undefined) {
+      throw adapterError(
+        "Resolver-based scope requires scopeContext for direct TanStack helper calls."
+      )
+    }
+    return resolveNormalizedScope(runtime, await options.scope(scopeContext.ctx, scopeContext.config))
+  }
+  return resolveNormalizedScope(runtime, options.scope)
+}
+
+const resolveToolScope = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  options: TanStackFractionMemoryOptions,
+  context: ToolExecutionContext | undefined
+) => {
+  if (hasDynamicToolScope(options.toolScope)) {
+    if (context === undefined) {
+      throw adapterError(
+        "Dynamic TanStack toolScope requires tool execution context for fractionTools()."
+      )
+    }
+    return resolveNormalizedScope(runtime, await options.toolScope(context))
+  }
+  if (options.toolScope !== undefined) {
+    return resolveNormalizedScope(runtime, options.toolScope)
+  }
+  if (!hasDynamicScope(options.scope)) {
+    return resolveNormalizedScope(runtime, options.scope)
+  }
+  throw adapterError(
+    "Dynamic middleware scope(ctx, config) is not available in TanStack tool execution; configure toolScope for fractionTools()."
+  )
+}
+
+const sameScopeValue = (left: string | undefined, right: string | undefined) =>
+  (left ?? undefined) === (right ?? undefined)
+
+const memoryMatchesScope = (record: MemoryRecord, scope: Scope) =>
+  sameScopeValue(record.scope.namespace, scope.namespace) &&
+  sameScopeValue(record.scope.userId, scope.userId) &&
+  sameScopeValue(record.scope.agentId, scope.agentId) &&
+  sameScopeValue(record.scope.runId, scope.runId) &&
+  sameScopeValue(record.scope.appId, scope.appId)
+
+const isMemoryNotFound = (error: unknown): error is MemoryNotFound =>
+  typeof error === "object" && error !== null && "_tag" in error && error._tag === "MemoryNotFound"
+
+const getMemoryRecord = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  id: string
+) => {
+  try {
+    return await runtime.runPromise(MemoryService.use((service) => service.get(id)))
+  } catch (error) {
+    if (isMemoryNotFound(error)) {
+      return undefined
+    }
+    throw error
+  }
+}
+
+const getScopedMemory = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  id: string,
+  scope: Scope
+) => {
+  const record = await getMemoryRecord(runtime, id)
+  if (record === undefined || !memoryMatchesScope(record, scope)) {
+    throw new MemoryNotFound({ memoryId: id })
+  }
+  return record
+}
+
 const filteredResults = (results: ReadonlyArray<SearchResult>, minScore: number | undefined) =>
   minScore === undefined ? results : results.filter((result) => result.score >= minScore)
 
@@ -239,35 +350,38 @@ const rememberContent = async (
 }
 
 export const recall = async (
-  options: TanStackFractionMemoryOptions & {
+  options: Omit<TanStackFractionMemoryOptions, "query"> & {
     readonly query: string
-  }
+  } & TanStackHelperScopeOptions
 ) => {
   const runtime = getRuntime(options.memory)
-  return recallWithResolvedScope(runtime, options.query, staticScope(options.scope), options)
+  const scope = await resolveHelperScope(runtime, options, options.scopeContext)
+  return recallWithResolvedScope(runtime, options.query, scope, options)
 }
 
 export const remember = async (
   options: TanStackFractionMemoryOptions & {
     readonly content: string
     readonly metadata?: JsonRecord
-  }
+  } & TanStackHelperScopeOptions
 ) => {
   const runtime = getRuntime(options.memory)
+  const scope = await resolveHelperScope(runtime, options, options.scopeContext)
   return runtime.runPromise(
     AdapterBridgeService.use((service) =>
-      service.rememberText(options.content, staticScope(options.scope), options.metadata)
+      service.rememberText(options.content, scope, options.metadata)
     )
   )
 }
 
 export const formatFractionContext = async (
-  options: TanStackFractionMemoryOptions & {
+  options: Omit<TanStackFractionMemoryOptions, "query"> & {
     readonly query: string
-  }
+  } & TanStackHelperScopeOptions
 ) => {
   const runtime = getRuntime(options.memory)
-  const results = await recall(options)
+  const scope = await resolveHelperScope(runtime, options, options.scopeContext)
+  const results = await recallWithResolvedScope(runtime, options.query, scope, options)
   return formatResults(runtime, results, options.recall)
 }
 
@@ -327,14 +441,14 @@ export const fractionTools = (
   options: TanStackFractionMemoryOptions
 ): ReadonlyArray<ServerTool<any, any, string>> => {
   const runtime = getRuntime(options.memory)
-  const scope = staticScope(options.scope)
 
   return [
     toolDefinition({
       name: "searchMemories",
       description: "Search previously stored Fraction memories.",
       inputSchema: toTanStackSchema(SearchMemoriesInputSchema)
-    }).server(async (input) => {
+    }).server(async (input, context) => {
+      const scope = await resolveToolScope(runtime, options, context)
       const results = await recallWithResolvedScope(
         runtime,
         input.query,
@@ -359,28 +473,32 @@ export const fractionTools = (
       name: "rememberMemory",
       description: "Persist a new memory into Fraction.",
       inputSchema: toTanStackSchema(RememberMemoryInputSchema)
-    }).server(async (input) =>
-      runtime.runPromise(
+    }).server(async (input, context) => {
+      const scope = await resolveToolScope(runtime, options, context)
+      return runtime.runPromise(
         AdapterBridgeService.use((service) =>
           service.rememberText(input.content, scope, input.metadata)
         )
       )
-    ),
+    }),
     toolDefinition({
       name: "forgetMemory",
       description: "Soft-delete a memory from Fraction recall results.",
       inputSchema: toTanStackSchema(ForgetMemoryInputSchema)
-    }).server(async (input) => {
-      await runtime.runPromise(MemoryService.use((service) => service.forget(input.id)))
+    }).server(async (input, context) => {
+      const scope = await resolveToolScope(runtime, options, context)
+      const record = await getScopedMemory(runtime, input.id, scope)
+      await runtime.runPromise(MemoryService.use((service) => service.forget(record.id)))
       return { ok: true }
     }),
     toolDefinition({
       name: "getMemory",
       description: "Fetch a single memory by id from Fraction.",
       inputSchema: toTanStackSchema(GetMemoryInputSchema)
-    }).server(async (input) =>
-      runtime.runPromise(MemoryService.use((service) => service.get(input.id)))
-    )
+    }).server(async (input, context) => {
+      const scope = await resolveToolScope(runtime, options, context)
+      return getScopedMemory(runtime, input.id, scope)
+    })
   ] as const
 }
 

@@ -8,8 +8,11 @@ import { Fraction } from "fraction"
 import {
   createTanStackCompressionProvider,
   createTanStackExtractionProvider,
+  formatFractionContext,
   fractionMiddleware,
-  fractionTools
+  fractionTools,
+  recall,
+  remember
 } from "../src/index"
 
 const openClients: Array<{ close: () => Promise<void> }> = []
@@ -28,6 +31,69 @@ afterEach(async () => {
 })
 
 describe("@fraction/tanstack-ai", () => {
+  const toolContextForUser = (userId: string) =>
+    ({
+      toolCallId: `tool:${userId}`,
+      emitCustomEvent: async () => {}
+    }) as const
+
+  const middlewareContextForUser = (userId: string) => ({
+    requestId: `req-${userId}`,
+    streamId: `stream-${userId}`,
+    phase: "init" as const,
+    iteration: 0,
+    chunkIndex: 0,
+    abort: () => {},
+    context: undefined,
+    defer: () => {},
+    provider: "test",
+    model: "test-model",
+    source: "server" as const,
+    streaming: false,
+    systemPrompts: [],
+    toolNames: [],
+    messageCount: 1,
+    hasTools: false,
+    currentMessageId: null,
+    accumulatedContent: "",
+    messages: [{ role: "user" as const, content: `${userId}: what do I know?` }],
+    createId: (prefix: string) => `${prefix}-${userId}`
+  })
+
+  const configForUser = (userId: string) => ({
+    messages: [{ role: "user" as const, content: `${userId}: what do I know?` }],
+    systemPrompts: [],
+    tools: []
+  })
+
+  const userIdFromConfig = (
+    config: Readonly<{ messages: ReadonlyArray<{ content: unknown }> }>
+  ) => {
+    const content = config.messages[0]?.content
+    return typeof content === "string" ? content.split(":")[0] ?? "" : ""
+  }
+
+  const expectAdapterError = async (operation: Promise<unknown>) => {
+    try {
+      await operation
+      throw new Error("Expected AdapterError")
+    } catch (error) {
+      expect(error).toMatchObject({ _tag: "AdapterError" })
+    }
+  }
+
+  const expectMemoryNotFound = async (operation: Promise<unknown>, memoryId: string) => {
+    try {
+      await operation
+      throw new Error("Expected MemoryNotFound")
+    } catch (error) {
+      expect(error).toMatchObject({
+        _tag: "MemoryNotFound",
+        memoryId
+      })
+    }
+  }
+
   test("tools can remember and search", async () => {
     const filename = join(process.cwd(), `.tmp-fraction-tanstack-${Date.now()}.sqlite`)
     createdPaths.add(filename)
@@ -49,6 +115,175 @@ describe("@fraction/tanstack-ai", () => {
 
     expect(search?.results.length).toBeGreaterThan(0)
     expect(search?.results[0]?.content.includes("Effect")).toBeTrue()
+  })
+
+  test("tools honor dynamic toolScope per execution", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-tanstack-toolscope-${Date.now()}.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
+    openClients.push(memory)
+
+    const tools = fractionTools({
+      memory,
+      scope: { namespace: "test" },
+      toolScope: (context) => ({
+        namespace: "test",
+        userId: (context.toolCallId ?? "").split(":")[1]
+      })
+    })
+
+    const rememberTool = tools.find((tool) => tool.name === "rememberMemory")
+    const searchTool = tools.find((tool) => tool.name === "searchMemories")
+
+    await rememberTool?.execute?.({ content: "Alice uses TanStack tools." }, toolContextForUser("alice"))
+    await rememberTool?.execute?.({ content: "Bob uses a different tenant." }, toolContextForUser("bob"))
+
+    const aliceSearch = await searchTool?.execute?.(
+      { query: "Who uses TanStack tools?" },
+      toolContextForUser("alice")
+    )
+    const bobSearch = await searchTool?.execute?.(
+      { query: "Who uses a different tenant?" },
+      toolContextForUser("bob")
+    )
+
+    expect(
+      aliceSearch?.results.some((result: { content: string }) =>
+        result.content.includes("Alice uses TanStack tools")
+      )
+    ).toBeTrue()
+    expect(
+      aliceSearch?.results.some((result: { content: string }) =>
+        result.content.includes("Bob uses a different tenant")
+      )
+    ).toBeFalse()
+    expect(
+      bobSearch?.results.some((result: { content: string }) =>
+        result.content.includes("Bob uses a different tenant")
+      )
+    ).toBeTrue()
+  })
+
+  test("helpers require scopeContext for resolver-based scopes and honor it when provided", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-tanstack-helpers-${Date.now()}.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
+    openClients.push(memory)
+
+    const ctx = middlewareContextForUser("alice")
+    const config = configForUser("alice")
+
+    await remember({
+      memory,
+      scope: (_scopeCtx, scopeConfig) => ({
+        namespace: "test",
+        userId: userIdFromConfig(scopeConfig)
+      }),
+      content: "Alice helper-scoped TanStack memory.",
+      scopeContext: { ctx, config }
+    })
+
+    const results = await recall({
+      memory,
+      scope: (_scopeCtx, scopeConfig) => ({
+        namespace: "test",
+        userId: userIdFromConfig(scopeConfig)
+      }),
+      query: "Who has helper-scoped TanStack memory?",
+      scopeContext: { ctx, config }
+    })
+
+    const formatted = await formatFractionContext({
+      memory,
+      scope: (_scopeCtx, scopeConfig) => ({
+        namespace: "test",
+        userId: userIdFromConfig(scopeConfig)
+      }),
+      query: "Who has helper-scoped TanStack memory?",
+      scopeContext: { ctx, config }
+    })
+
+    expect(results.some((result) => result.memory.content.includes("Alice helper-scoped TanStack memory"))).toBeTrue()
+    expect(formatted.includes("Alice helper-scoped TanStack memory")).toBeTrue()
+
+    await expectAdapterError(
+      recall({
+        memory,
+        scope: () => ({ namespace: "test", userId: "alice" }),
+        query: "missing context"
+      })
+    )
+  })
+
+  test("tools fail clearly without toolScope when scope is middleware-only dynamic", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-tanstack-missing-toolscope-${Date.now()}.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
+    openClients.push(memory)
+
+    const tools = fractionTools({
+      memory,
+      scope: () => ({ namespace: "test", userId: "alice" })
+    })
+
+    const searchTool = tools.find((tool) => tool.name === "searchMemories")
+
+    await expectAdapterError(searchTool!.execute!({ query: "test" }, toolContextForUser("alice")))
+  })
+
+  test("by-id tools enforce tool scope and return not found on cross-tenant access", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-tanstack-by-id-${Date.now()}.sqlite`)
+    createdPaths.add(filename)
+
+    const memory = await Fraction.open({
+      filename,
+      defaultNamespace: "test",
+      compressorType: "heuristic"
+    })
+    openClients.push(memory)
+
+    const alice = await memory.add("Alice tenant memory.", { namespace: "test", userId: "alice" })
+    const bob = await memory.add("Bob tenant memory.", { namespace: "test", userId: "bob" })
+
+    const tools = fractionTools({
+      memory,
+      scope: { namespace: "test" },
+      toolScope: (context) => ({
+        namespace: "test",
+        userId: (context.toolCallId ?? "").split(":")[1]
+      })
+    })
+
+    const getTool = tools.find((tool) => tool.name === "getMemory")
+    const forgetTool = tools.find((tool) => tool.name === "forgetMemory")
+
+    const ownRecord = await getTool?.execute?.({ id: alice.id }, toolContextForUser("alice"))
+    expect(ownRecord?.content).toContain("Alice tenant memory")
+
+    await expectMemoryNotFound(getTool!.execute!({ id: bob.id }, toolContextForUser("alice")), bob.id)
+
+    await expectMemoryNotFound(
+      forgetTool!.execute!({ id: bob.id }, toolContextForUser("alice")),
+      bob.id
+    )
+
+    const bobStillExists = await memory.get(bob.id)
+    expect(bobStillExists.content).toContain("Bob tenant memory")
   })
 
   test("middleware injects memory context into system prompts", async () => {

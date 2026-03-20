@@ -11,7 +11,7 @@ import type {
   SharedV3ProviderOptions
 } from "@ai-sdk/provider"
 import type { ManagedRuntime } from "effect"
-import type { EmbeddingModel, LanguageModel } from "ai"
+import type { EmbeddingModel, LanguageModel, ModelMessage } from "ai"
 
 import type {
   CompressionProvider,
@@ -24,9 +24,12 @@ import type {
   Scope
 } from "fraction"
 import {
+  AdapterError,
   AdapterBridgeService,
   ExtractionResultSchema,
   CompressionResultSchema,
+  MemoryNotFound,
+  type MemoryRecord,
   type SearchResult,
   MemoryService
 } from "fraction/effect"
@@ -60,6 +63,10 @@ export interface VercelFractionMemoryOptions {
   readonly filter?: FilterExpr
   readonly recall?: RecallOptions
   readonly remember?: VercelRememberSettings
+}
+
+export interface VercelHelperScopeOptions {
+  readonly scopeContext?: VercelScopeResolverInput
 }
 
 export interface VercelEmbeddingProviderOptions {
@@ -111,8 +118,19 @@ const getRuntime = (memory: RuntimeLike): ManagedRuntime.ManagedRuntime<any, any
   return memory
 }
 
-const staticScope = (scope: VercelFractionMemoryOptions["scope"]): Scope | undefined =>
-  typeof scope === "function" ? undefined : scope
+type ScopeResolver = Exclude<VercelFractionMemoryOptions["scope"], Scope | undefined>
+type VercelToolExecutionContext = {
+  readonly messages?: ReadonlyArray<ModelMessage>
+}
+
+const hasDynamicScope = (
+  scope: VercelFractionMemoryOptions["scope"]
+): scope is ScopeResolver => typeof scope === "function"
+
+const adapterError = (message: string) =>
+  new AdapterError({
+    message
+  })
 
 const effectSchemaToAiSchema = <TSchema extends Schema.Top>(schema: TSchema) =>
   jsonSchema<Schema.Schema.Type<TSchema>>(() => Schema.toJsonSchemaDocument(schema).schema, {
@@ -187,6 +205,43 @@ const promptToText = (prompt: LanguageModelV3Prompt) =>
     .filter((value) => value.trim().length > 0)
     .join("\n")
 
+const modelMessageText = (message: ModelMessage): string => {
+  if (typeof message.content === "string") {
+    return message.content
+  }
+  if (!Array.isArray(message.content)) {
+    return ""
+  }
+  return message.content
+    .flatMap((part) => {
+      if (part.type === "text") {
+        return [part.text]
+      }
+      if ("text" in part && typeof part.text === "string") {
+        return [part.text]
+      }
+      return []
+    })
+    .join("\n")
+}
+
+const toResolverPrompt = (messages: ReadonlyArray<ModelMessage>): LanguageModelV3Prompt =>
+  messages.reduce<LanguageModelV3Prompt>((prompt, message) => {
+    const text = modelMessageText(message).trim()
+    if (text.length === 0) {
+      return prompt
+    }
+    if (message.role === "system") {
+      prompt.push({ role: "system", content: text })
+      return prompt
+    }
+    prompt.push({
+      role: message.role === "assistant" || message.role === "tool" ? "assistant" : "user",
+      content: [{ type: "text", text }]
+    })
+    return prompt
+  }, [])
+
 const queryFromPrompt = (prompt: LanguageModelV3Prompt) => {
   const lastUser = [...prompt].reverse().find((message) => message.role === "user")
   if (lastUser) {
@@ -223,6 +278,84 @@ const resolveScope = async (
   options: VercelFractionMemoryOptions,
   input: VercelScopeResolverInput
 ) => (typeof options.scope === "function" ? options.scope(input) : options.scope)
+
+const resolveNormalizedScope = (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  scope: Scope | undefined
+) => runtime.runPromise(AdapterBridgeService.use((service) => service.resolveScope(scope)))
+
+const resolveHelperScope = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  options: Pick<VercelFractionMemoryOptions, "scope">,
+  scopeContext: VercelScopeResolverInput | undefined
+) => {
+  if (hasDynamicScope(options.scope)) {
+    if (scopeContext === undefined) {
+      throw adapterError(
+        "Resolver-based scope requires scopeContext for direct Vercel helper calls."
+      )
+    }
+    return resolveNormalizedScope(runtime, await options.scope(scopeContext))
+  }
+  return resolveNormalizedScope(runtime, options.scope)
+}
+
+const resolveToolScope = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  options: VercelFractionMemoryOptions,
+  context: VercelToolExecutionContext | undefined
+) => {
+  if (!hasDynamicScope(options.scope)) {
+    return resolveNormalizedScope(runtime, options.scope)
+  }
+  const prompt = toResolverPrompt(context?.messages ?? [])
+  return resolveNormalizedScope(
+    runtime,
+    await options.scope({
+      prompt,
+      params: { prompt } as LanguageModelV3CallOptions
+    })
+  )
+}
+
+const sameScopeValue = (left: string | undefined, right: string | undefined) =>
+  (left ?? undefined) === (right ?? undefined)
+
+const memoryMatchesScope = (record: MemoryRecord, scope: Scope) =>
+  sameScopeValue(record.scope.namespace, scope.namespace) &&
+  sameScopeValue(record.scope.userId, scope.userId) &&
+  sameScopeValue(record.scope.agentId, scope.agentId) &&
+  sameScopeValue(record.scope.runId, scope.runId) &&
+  sameScopeValue(record.scope.appId, scope.appId)
+
+const isMemoryNotFound = (error: unknown): error is MemoryNotFound =>
+  typeof error === "object" && error !== null && "_tag" in error && error._tag === "MemoryNotFound"
+
+const getMemoryRecord = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  id: string
+) => {
+  try {
+    return await runtime.runPromise(MemoryService.use((service) => service.get(id)))
+  } catch (error) {
+    if (isMemoryNotFound(error)) {
+      return undefined
+    }
+    throw error
+  }
+}
+
+const getScopedMemory = async (
+  runtime: ManagedRuntime.ManagedRuntime<any, any>,
+  id: string,
+  scope: Scope
+) => {
+  const record = await getMemoryRecord(runtime, id)
+  if (record === undefined || !memoryMatchesScope(record, scope)) {
+    throw new MemoryNotFound({ memoryId: id })
+  }
+  return record
+}
 
 const filteredResults = (results: ReadonlyArray<SearchResult>, minScore: number | undefined) =>
   minScore === undefined ? results : results.filter((result) => result.score >= minScore)
@@ -328,35 +461,38 @@ const consumeStreamForMemory = async (
 }
 
 export const recall = async (
-  options: VercelFractionMemoryOptions & {
+  options: Omit<VercelFractionMemoryOptions, "query"> & {
     readonly query: string
-  }
+  } & VercelHelperScopeOptions
 ) => {
   const runtime = getRuntime(options.memory)
-  return recallWithResolvedScope(runtime, options.query, staticScope(options.scope), options)
+  const scope = await resolveHelperScope(runtime, options, options.scopeContext)
+  return recallWithResolvedScope(runtime, options.query, scope, options)
 }
 
 export const remember = async (
   options: VercelFractionMemoryOptions & {
     readonly content: string
     readonly metadata?: JsonRecord
-  }
+  } & VercelHelperScopeOptions
 ) => {
   const runtime = getRuntime(options.memory)
+  const scope = await resolveHelperScope(runtime, options, options.scopeContext)
   return runtime.runPromise(
     AdapterBridgeService.use((service) =>
-      service.rememberText(options.content, staticScope(options.scope), options.metadata)
+      service.rememberText(options.content, scope, options.metadata)
     )
   )
 }
 
 export const formatFractionContext = async (
-  options: VercelFractionMemoryOptions & {
+  options: Omit<VercelFractionMemoryOptions, "query"> & {
     readonly query: string
-  }
+  } & VercelHelperScopeOptions
 ) => {
   const runtime = getRuntime(options.memory)
-  const results = await recall(options)
+  const scope = await resolveHelperScope(runtime, options, options.scopeContext)
+  const results = await recallWithResolvedScope(runtime, options.query, scope, options)
   return formatResults(runtime, results, options.recall)
 }
 
@@ -463,11 +599,12 @@ export const fractionTools = (options: VercelFractionMemoryOptions) => {
     searchMemories: tool({
       description: "Search previously stored Fraction memories.",
       inputSchema: effectSchemaToAiSchema(SearchMemoriesInputSchema),
-      execute: async (input) => {
+      execute: async (input, context) => {
+        const scope = await resolveToolScope(runtime, options, context)
         const results = await recallWithResolvedScope(
           runtime,
           input.query,
-          staticScope(options.scope),
+          scope,
           options.filter === undefined
             ? { recall: { ...options.recall, limit: input.limit ?? options.recall?.limit } }
             : {
@@ -488,26 +625,32 @@ export const fractionTools = (options: VercelFractionMemoryOptions) => {
     rememberMemory: tool({
       description: "Persist a new memory into Fraction.",
       inputSchema: effectSchemaToAiSchema(RememberMemoryInputSchema),
-      execute: async (input) =>
-        runtime.runPromise(
+      execute: async (input, context) => {
+        const scope = await resolveToolScope(runtime, options, context)
+        return runtime.runPromise(
           AdapterBridgeService.use((service) =>
-            service.rememberText(input.content, staticScope(options.scope), input.metadata)
+            service.rememberText(input.content, scope, input.metadata)
           )
         )
+      }
     }),
     forgetMemory: tool({
       description: "Soft-delete a memory from Fraction recall results.",
       inputSchema: effectSchemaToAiSchema(ForgetMemoryInputSchema),
-      execute: async (input) => {
-        await runtime.runPromise(MemoryService.use((service) => service.forget(input.id)))
+      execute: async (input, context) => {
+        const scope = await resolveToolScope(runtime, options, context)
+        const record = await getScopedMemory(runtime, input.id, scope)
+        await runtime.runPromise(MemoryService.use((service) => service.forget(record.id)))
         return { ok: true }
       }
     }),
     getMemory: tool({
       description: "Fetch a single memory by id from Fraction.",
       inputSchema: effectSchemaToAiSchema(GetMemoryInputSchema),
-      execute: async (input) =>
-        runtime.runPromise(MemoryService.use((service) => service.get(input.id)))
+      execute: async (input, context) => {
+        const scope = await resolveToolScope(runtime, options, context)
+        return getScopedMemory(runtime, input.id, scope)
+      }
     })
   }
 }
