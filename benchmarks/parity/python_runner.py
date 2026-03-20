@@ -106,6 +106,7 @@ def create_memory(scenario: dict[str, Any], filename_root: str):
         vector_store_path=f"{filename_root}.usearch",
         metadata_path=f"{filename_root}_metadata.json",
         history_db_path=f"{filename_root}_history.db",
+        default_user_id="" if scenario.get("workload", {}).get("kind") in {"conversation-retrieval", "conversation-qa"} else "default",
     )
     return Memory(data_dir=str(Path(filename_root).parent / "python-data"), config=config, auto_save=False)
 
@@ -300,6 +301,60 @@ def load_conversation_dataset(manifest_path: str) -> dict[str, Any]:
     }
 
 
+def conversation_strategy_for(scenario: dict[str, Any]) -> str | None:
+    if scenario["workload"]["kind"] in {"conversation-retrieval", "conversation-qa"}:
+        return scenario.get("conversationStrategy", "speaker-partitioned-merge-v1")
+    return None
+
+
+def merge_search_results(results_list: list[dict[str, Any]]) -> dict[str, Any]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    latency_ms = 0.0
+    for results in results_list:
+        latency_ms += float(results.get("latency_ms", 0.0))
+        for result in results.get("results", []):
+            result_id = str(result.get("id", ""))
+            if not result_id or result_id in seen:
+                continue
+            seen.add(result_id)
+            merged.append(result)
+    return {
+        "results": merged,
+        "latency_ms": round(latency_ms, 2),
+    }
+
+
+def search_conversation_question(
+    memory: Any,
+    conversation: dict[str, Any],
+    question: str,
+    top_k: int,
+    strategy: str | None,
+) -> dict[str, Any]:
+    if strategy != "speaker-partitioned-merge-v1":
+        raise ValueError(f"Unsupported conversation strategy: {strategy!r}")
+
+    speaker_a = memory.search(
+        question,
+        run_id=conversation["id"],
+        limit=top_k,
+        filters={"speaker": conversation["speakerA"]},
+    )
+    speaker_b = memory.search(
+        question,
+        run_id=conversation["id"],
+        limit=top_k,
+        filters={"speaker": conversation["speakerB"]},
+    )
+    conversation_wide = memory.search(
+        question,
+        run_id=conversation["id"],
+        limit=top_k,
+    )
+    return merge_search_results([speaker_a, speaker_b, conversation_wide])
+
+
 def openai_chat(model: str, prompt: str, max_tokens: int) -> str:
     import urllib.request
 
@@ -331,10 +386,10 @@ def group_memories_by_speaker(results: dict[str, Any], speaker_a: str, speaker_b
     speaker_b_memories = []
     for result in results.get("results", []):
         raw = result.get("metadata", {}).get("content_raw") or result.get("memory", "")
-        user_id = result.get("metadata", {}).get("user_id")
-        if user_id == speaker_a:
+        speaker = result.get("metadata", {}).get("speaker")
+        if speaker == speaker_a:
             speaker_a_memories.append(f"- {raw}")
-        elif user_id == speaker_b:
+        elif speaker == speaker_b:
             speaker_b_memories.append(f"- {raw}")
     return ("\n".join(speaker_a_memories) or "(no memories found)", "\n".join(speaker_b_memories) or "(no memories found)")
 
@@ -364,6 +419,7 @@ def run_conversation_scenario(suite: dict[str, Any], scenario: dict[str, Any], e
     expected_ids: list[list[str]] = []
     qa_rows: list[dict[str, Any]] = []
     conversations = dataset["conversations"][: int(scenario["workload"].get("maxConversations", len(dataset["conversations"])))]
+    conversation_strategy = conversation_strategy_for(scenario)
 
     def run_once(index: int, record_metrics: bool) -> int:
         filename_root = str(Path(".benchmark-parity") / "py" / f"{suite['suiteId']}-{scenario['id']}" / f"run-{index}")
@@ -383,8 +439,12 @@ def run_conversation_scenario(suite: dict[str, Any], scenario: dict[str, Any], e
                     started = time.perf_counter()
                     created = memory.add(
                         text,
-                        user_id=turn.get("speaker") or turn.get("role"),
-                        metadata={"namespace": conversation["id"]},
+                        run_id=conversation["id"],
+                        metadata={
+                            "speaker": turn.get("speaker") or turn.get("role"),
+                            "conversationId": conversation["id"],
+                            "turnIndex": turn_index,
+                        },
                     )
                     created_rows = created.get("results", [])
                     if created_rows:
@@ -399,7 +459,13 @@ def run_conversation_scenario(suite: dict[str, Any], scenario: dict[str, Any], e
                 ]
                 for question in conversation["questions"][: int(scenario["workload"].get("maxQuestions", len(conversation["questions"])))]:
                     started = time.perf_counter()
-                    results = memory.search(question["question"], limit=int(scenario.get("topK", suite["topK"])))
+                    results = search_conversation_question(
+                        memory,
+                        conversation,
+                        question["question"],
+                        int(scenario.get("topK", suite["topK"])),
+                        conversation_strategy,
+                    )
                     if record_metrics:
                         timings["searchMs"].append((time.perf_counter() - started) * 1000)
                         ranked_ids.append(search_ids(results))

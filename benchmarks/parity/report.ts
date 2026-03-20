@@ -94,6 +94,11 @@ export const renderMarkdownReport = (report: ComparisonReport) => {
     lines.push(
       `- Retrieval: py hit@5=${formatMetric(metricValue(entry.python, "hitAt5"))}, ts hit@5=${formatMetric(metricValue(entry.typescript, "hitAt5"))}, py MRR=${formatMetric(metricValue(entry.python, "mrr"))}, ts MRR=${formatMetric(metricValue(entry.typescript, "mrr"))}`
     )
+    if (entry.python?.retrievalMetrics || entry.typescript?.retrievalMetrics) {
+      lines.push(
+        `- Label Quality: py multi=${formatMetric(entry.python?.retrievalMetrics?.multiExpectedRate)}, ts multi=${formatMetric(entry.typescript?.retrievalMetrics?.multiExpectedRate)}, py empty=${formatMetric(entry.python?.retrievalMetrics?.emptyExpectedRate)}, ts empty=${formatMetric(entry.typescript?.retrievalMetrics?.emptyExpectedRate)}, py expected/query=${formatMetric(entry.python?.retrievalMetrics?.expectedIdsPerQueryMean, 2)}, ts expected/query=${formatMetric(entry.typescript?.retrievalMetrics?.expectedIdsPerQueryMean, 2)}`
+      )
+    }
     lines.push(
       `- QA BLEU-1: py=${formatMetric(metricValue(entry.python, "bleu1"))}, ts=${formatMetric(metricValue(entry.typescript, "bleu1"))}`
     )

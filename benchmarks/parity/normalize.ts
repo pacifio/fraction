@@ -7,6 +7,7 @@ export type BenchmarkTier = "strict-pipeline" | "shipped-defaults"
 export type BenchmarkMode = "exact-config" | "best-effort-local" | "shipped-defaults"
 export type CachePolicy = "cold" | "warm" | "mixed"
 export type RuntimeTarget = "python" | "typescript"
+export type ConversationStrategy = "speaker-partitioned-merge-v1"
 export type WorkloadKind =
   | "synthetic-crud-retrieval"
   | "conversation-retrieval"
@@ -68,6 +69,7 @@ export interface BenchmarkScenario {
   readonly mode: BenchmarkMode
   readonly cachePolicy: CachePolicy
   readonly workload: BenchmarkWorkload
+  readonly conversationStrategy?: ConversationStrategy | undefined
   readonly config?: BenchmarkConfigMapping
   readonly topK?: number
   readonly warmupRuns?: number
@@ -206,6 +208,10 @@ export interface RetrievalMetricSummary {
   readonly mrr: number
   readonly ndcgAt5: number
   readonly totalQueries: number
+  readonly labelAmbiguityRate: number
+  readonly multiExpectedRate: number
+  readonly emptyExpectedRate: number
+  readonly expectedIdsPerQueryMean: number
 }
 
 export interface QaMetricSummary {
@@ -400,6 +406,9 @@ export const evaluateRetrieval = (
   expectedIds: ReadonlyArray<ReadonlyArray<string>>
 ): RetrievalMetricSummary => {
   const totalQueries = expectedIds.length
+  const multiExpected = expectedIds.filter((ids) => ids.length > 1).length
+  const emptyExpected = expectedIds.filter((ids) => ids.length === 0).length
+  const totalExpectedIds = expectedIds.reduce((sum, ids) => sum + ids.length, 0)
   if (totalQueries === 0) {
     return {
       hitAt1: 0,
@@ -408,7 +417,11 @@ export const evaluateRetrieval = (
       recallAt5: 0,
       mrr: 0,
       ndcgAt5: 0,
-      totalQueries: 0
+      totalQueries: 0,
+      labelAmbiguityRate: 0,
+      multiExpectedRate: 0,
+      emptyExpectedRate: 0,
+      expectedIdsPerQueryMean: 0
     }
   }
 
@@ -450,7 +463,11 @@ export const evaluateRetrieval = (
     recallAt5: recallAt5 / totalQueries,
     mrr: mrr / totalQueries,
     ndcgAt5: ndcgAt5 / totalQueries,
-    totalQueries
+    totalQueries,
+    labelAmbiguityRate: multiExpected / totalQueries,
+    multiExpectedRate: multiExpected / totalQueries,
+    emptyExpectedRate: emptyExpected / totalQueries,
+    expectedIdsPerQueryMean: totalExpectedIds / totalQueries
   }
 }
 

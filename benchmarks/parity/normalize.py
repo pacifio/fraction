@@ -151,6 +151,9 @@ def dcg_at_k(relevances: list[int], limit: int) -> float:
 
 def evaluate_retrieval(ranked_ids: list[list[str]], expected_ids: list[list[str]]) -> dict[str, float]:
     total_queries = len(expected_ids)
+    multi_expected = len([ids for ids in expected_ids if len(ids) > 1])
+    empty_expected = len([ids for ids in expected_ids if len(ids) == 0])
+    total_expected_ids = sum(len(ids) for ids in expected_ids)
     if total_queries == 0:
         return {
             "hitAt1": 0.0,
@@ -160,6 +163,10 @@ def evaluate_retrieval(ranked_ids: list[list[str]], expected_ids: list[list[str]
             "mrr": 0.0,
             "ndcgAt5": 0.0,
             "totalQueries": 0,
+            "labelAmbiguityRate": 0.0,
+            "multiExpectedRate": 0.0,
+            "emptyExpectedRate": 0.0,
+            "expectedIdsPerQueryMean": 0.0,
         }
     hit_1 = 0
     hit_3 = 0
@@ -194,6 +201,10 @@ def evaluate_retrieval(ranked_ids: list[list[str]], expected_ids: list[list[str]
         "mrr": mrr / total_queries,
         "ndcgAt5": ndcg / total_queries,
         "totalQueries": total_queries,
+        "labelAmbiguityRate": multi_expected / total_queries,
+        "multiExpectedRate": multi_expected / total_queries,
+        "emptyExpectedRate": empty_expected / total_queries,
+        "expectedIdsPerQueryMean": total_expected_ids / total_queries,
     }
 
 

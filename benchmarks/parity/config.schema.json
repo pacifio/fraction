@@ -132,6 +132,7 @@
         "mode": { "enum": ["exact-config", "best-effort-local", "shipped-defaults"] },
         "cachePolicy": { "enum": ["cold", "warm", "mixed"] },
         "workload": { "$ref": "#/$defs/workload" },
+        "conversationStrategy": { "enum": ["speaker-partitioned-merge-v1"] },
         "config": {
           "type": "object",
           "properties": {

@@ -244,6 +244,11 @@ const loadConversationDataset = (manifestPath: string) => {
   return normalizeConversationDataset(manifest)
 }
 
+const conversationStrategyFor = (scenario: BenchmarkScenario) =>
+  scenario.workload.kind === "conversation-retrieval" || scenario.workload.kind === "conversation-qa"
+    ? (scenario.conversationStrategy ?? "speaker-partitioned-merge-v1")
+    : undefined
+
 const searchIds = (results: ReadonlyArray<SearchResult>) =>
   results.map((result) => result.memory.id)
 
@@ -461,6 +466,50 @@ const runSyntheticScenario = async (
 
 const turnText = (turn: ConversationTurn) => turn.text ?? turn.content ?? ""
 const turnSpeaker = (turn: ConversationTurn) => turn.speaker ?? turn.role ?? "speaker"
+const speakerFilter = (speaker: string): FilterExpr => ({ field: "speaker", op: "eq", value: speaker })
+
+const mergeSearchResults = (...resultLists: ReadonlyArray<ReadonlyArray<SearchResult>>) => {
+  const merged: Array<SearchResult> = []
+  const seen = new Set<string>()
+
+  for (const results of resultLists) {
+    for (const result of results) {
+      const id = result.memory.id
+      if (seen.has(id)) {
+        continue
+      }
+      seen.add(id)
+      merged.push(result)
+    }
+  }
+
+  return merged
+}
+
+const searchConversationQuestion = async (
+  memory: Awaited<ReturnType<typeof Memory.open>>,
+  conversation: ConversationDataset["conversations"][number],
+  question: string,
+  topK: number,
+  strategy: ReturnType<typeof conversationStrategyFor>
+) => {
+  if (strategy !== "speaker-partitioned-merge-v1") {
+    throw new Error(`Unsupported conversation strategy: ${strategy ?? "undefined"}`)
+  }
+
+  const scope = { namespace: conversation.id }
+  const speakerAResults = await memory.search(question, scope, {
+    limit: topK,
+    filter: speakerFilter(conversation.speakerA)
+  })
+  const speakerBResults = await memory.search(question, scope, {
+    limit: topK,
+    filter: speakerFilter(conversation.speakerB)
+  })
+  const conversationWideResults = await memory.search(question, scope, { limit: topK })
+
+  return mergeSearchResults(speakerAResults, speakerBResults, conversationWideResults)
+}
 
 const groupMemoriesBySpeaker = (
   results: ReadonlyArray<SearchResult>,
@@ -468,11 +517,11 @@ const groupMemoriesBySpeaker = (
   speakerB: string
 ) => {
   const speakerAMemories = results
-    .filter((result) => result.memory.scope.userId === speakerA)
+    .filter((result) => result.memory.metadata.speaker === speakerA)
     .map((result) => `- ${result.memory.rawContent || result.memory.content}`)
     .join("\n") || "(no memories found)"
   const speakerBMemories = results
-    .filter((result) => result.memory.scope.userId === speakerB)
+    .filter((result) => result.memory.metadata.speaker === speakerB)
     .map((result) => `- ${result.memory.rawContent || result.memory.content}`)
     .join("\n") || "(no memories found)"
   return { speakerAMemories, speakerBMemories }
@@ -574,6 +623,7 @@ const runConversationScenario = async (
   const qaRows: Array<{ answer: string; prediction: string; question: string; judgeLikert?: number; judgeBinary?: number }> = []
   const notes: Array<string> = []
   const conversations = dataset.conversations.slice(0, scenario.workload.maxConversations ?? dataset.conversations.length)
+  const conversationStrategy = conversationStrategyFor(scenario)
   let diskBytes = 0
 
   const runOnce = async (runIndex: number, recordMetrics: boolean) => {
@@ -594,10 +644,17 @@ const runConversationScenario = async (
             continue
           }
           const started = performance.now()
-          const created = await memory.add(text, {
-            namespace: conversation.id,
-            userId: turnSpeaker(turn)
-          })
+          const created = await memory.add(
+            text,
+            {
+              namespace: conversation.id
+            },
+            {
+              speaker: turnSpeaker(turn),
+              conversationId: conversation.id,
+              turnIndex
+            }
+          )
           turnFixtureToRuntimeIds.set(`${conversation.id}-turn-${turnIndex}`, created.id)
           if (recordMetrics) {
             timings.addMs.push(performance.now() - started)
@@ -614,9 +671,13 @@ const runConversationScenario = async (
           scenario.workload.maxQuestions ?? conversation.questions.length
         )) {
           const started = performance.now()
-          const results = await memory.search(question.question, { namespace: conversation.id }, {
-            limit: scenario.topK ?? suite.topK
-          })
+          const results = await searchConversationQuestion(
+            memory,
+            conversation,
+            question.question,
+            scenario.topK ?? suite.topK,
+            conversationStrategy
+          )
           if (recordMetrics) {
             timings.searchMs.push(performance.now() - started)
             rankedIds.push(searchIds(results))

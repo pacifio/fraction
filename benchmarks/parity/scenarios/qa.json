@@ -14,6 +14,7 @@
       "name": "Conversation QA on Real LoCoMo Dataset",
       "mode": "best-effort-local",
       "cachePolicy": "warm",
+      "conversationStrategy": "speaker-partitioned-merge-v1",
       "workload": {
         "kind": "conversation-qa",
         "dataset": {

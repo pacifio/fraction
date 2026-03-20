@@ -107,6 +107,11 @@ Suite intent:
 - `strict`, `defaults`, and `qa` all use `topK=15` and `compressionRate=0.6` to match the historical Python benchmark defaults.
 - `strict` and `qa` currently default to a shared benchmark-only `off` compression path so Tier 1 measures the storage and retrieval pipeline without runtime-specific local model downloads.
 - `defaults` keeps the real shipped product defaults, including runtime-native local compression.
+- conversation workloads use `speaker-partitioned-merge-v1`:
+  - turns are stored at conversation scope
+  - speaker identity is stored in metadata
+  - retrieval runs speaker A, speaker B, and conversation-wide searches, then merges them deterministically
 - end-to-end QA requires `OPENAI_API_KEY`.
 - the QA prompt and judge prompts are frozen in both runtimes to keep prompt parity stable.
 - generated reports now include dataset provenance so each run records the exact dataset path and whether fallback was allowed or used.
+- expected supporting-memory labels are still heuristic because the LoCoMo file does not include gold turn annotations; reports now surface label ambiguity metrics alongside retrieval scores.
