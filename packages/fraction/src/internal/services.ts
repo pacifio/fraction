@@ -1599,7 +1599,10 @@ export class MemoryService extends ServiceMap.Service<
             (input) => extractor.extract(input),
             { concurrency: "unbounded" }
           )
-          const embeddingsBatch = yield* embeddings.embedMany(extracted.map((entry) => entry.content))
+          const finalContents = extracted.map((entry, index) =>
+            entry.content.trim().length > 0 ? entry.content.trim() : compressed[index]!.content
+          )
+          const embeddingsBatch = yield* embeddings.embedMany(finalContents)
           const active = [...(yield* repo.listActive(scope))]
           const records: Array<MemoryRecord> = []
 
@@ -1607,10 +1610,7 @@ export class MemoryService extends ServiceMap.Service<
             const rawContent = inputs[index]!
             const compressionResult = compressed[index]!
             const extraction = extracted[index]!
-            const finalContent =
-              extraction.content.trim().length > 0
-                ? extraction.content.trim()
-                : compressionResult.content
+            const finalContent = finalContents[index]!
             const embedding = embeddingsBatch[index]!
             const contentHash = hashText(finalContent)
             const duplicate = active.find((memory) => hashText(memory.content) === contentHash)

@@ -217,6 +217,44 @@ describe("Memory", () => {
     expect(singleCalls).toBe(0)
   })
 
+  test("batches embeddings from the stored fallback content when extraction is empty", async () => {
+    const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-batch-fallback-embedding.sqlite`)
+    createdPaths.add(filename)
+
+    const batchCalls: Array<ReadonlyArray<string>> = []
+    const memory = await Memory.open({
+      ...baseOptions(filename),
+      extractionProvider: {
+        extract: () => ({
+          content: "   ",
+          entities: [],
+          eventAt: null
+        })
+      },
+      embeddingProvider: {
+        embed: (text) => Float32Array.from([text.length, 1, 0, 0]),
+        embedMany: (texts) => {
+          batchCalls.push(texts)
+          return texts.map((text) => Float32Array.from([text.length, 1, 0, 0]))
+        }
+      }
+    })
+    openClients.push(memory)
+
+    const records = await memory.addMany(
+      ["Ada works on Fraction's SDK.", "Linus prefers Bun-based tooling."],
+      { namespace: "test" }
+    )
+
+    expect(records.map((record) => record.content)).toEqual([
+      "Ada works on Fraction's SDK.",
+      "Linus prefers Bun-based tooling."
+    ])
+    expect(batchCalls).toEqual([
+      ["Ada works on Fraction's SDK.", "Linus prefers Bun-based tooling."]
+    ])
+  })
+
   test("uses a configured extraction provider when present", async () => {
     const filename = join(process.cwd(), `.tmp-fraction-${Date.now()}-extract.sqlite`)
     createdPaths.add(filename)
