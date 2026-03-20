@@ -18,7 +18,12 @@
     "fmt": "bun x oxfmt -c .oxfmtrc.json --write packages benchmarks package.json tsconfig.json tsconfig.base.json tsconfig.oxc.json tsconfig.oxc.base.json .oxlintrc.json .oxfmtrc.json",
     "fmt:check": "bun x oxfmt -c .oxfmtrc.json --check packages benchmarks package.json tsconfig.json tsconfig.base.json tsconfig.oxc.json tsconfig.oxc.base.json .oxlintrc.json .oxfmtrc.json",
     "test": "bun run --filter './packages/*' test",
-    "benchmark:sdk": "bun benchmarks/bun-sdk-benchmark.ts"
+    "benchmark:sdk": "bun benchmarks/bun-sdk-benchmark.ts",
+    "benchmark:parity:smoke": "bun benchmarks/parity/orchestrate.ts --suite benchmarks/parity/scenarios/smoke.json",
+    "benchmark:parity:strict": "bun benchmarks/parity/orchestrate.ts --suite benchmarks/parity/scenarios/strict.json",
+    "benchmark:parity:defaults": "bun benchmarks/parity/orchestrate.ts --suite benchmarks/parity/scenarios/defaults.json",
+    "benchmark:parity:qa": "bun benchmarks/parity/orchestrate.ts --suite benchmarks/parity/scenarios/qa.json",
+    "benchmark:parity:report": "bun benchmarks/parity/orchestrate.ts --suite benchmarks/parity/scenarios/strict.json"
   },
   "devDependencies": {
     "@types/bun": "1.3.8",

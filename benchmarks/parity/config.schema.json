@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fraction.dev/benchmarks/parity/config.schema.json",
+  "title": "Fraction parity benchmark suite config",
+  "type": "object",
+  "required": [
+    "suiteId",
+    "title",
+    "tier",
+    "runtimeTargets",
+    "warmupRuns",
+    "measuredRuns",
+    "topK",
+    "scopeMode",
+    "outputDir",
+    "scenarios"
+  ],
+  "properties": {
+    "suiteId": { "type": "string" },
+    "title": { "type": "string" },
+    "tier": { "enum": ["strict-pipeline", "shipped-defaults"] },
+    "runtimeTargets": {
+      "type": "array",
+      "items": { "enum": ["python", "typescript"] },
+      "minItems": 1
+    },
+    "warmupRuns": { "type": "integer", "minimum": 0 },
+    "measuredRuns": { "type": "integer", "minimum": 1 },
+    "topK": { "type": "integer", "minimum": 1 },
+    "scopeMode": { "type": "string" },
+    "outputDir": { "type": "string" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/scenario" }
+    }
+  },
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "properties": {
+        "namespace": { "type": "string" },
+        "userId": { "type": "string" },
+        "agentId": { "type": "string" },
+        "runId": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "filter": {
+      "type": "object",
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op": { "enum": ["eq", "contains"] },
+        "value": {}
+      },
+      "additionalProperties": false
+    },
+    "datasetRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "path"],
+          "properties": {
+            "type": { "const": "synthetic-memory" },
+            "path": { "type": "string" },
+            "datasetLabel": {
+              "enum": ["real-locomo", "synthetic-generated", "synthetic-fixture"]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "manifest"],
+          "properties": {
+            "type": { "const": "conversation-manifest" },
+            "manifest": { "type": "string" },
+            "datasetLabel": {
+              "enum": ["real-locomo", "synthetic-generated", "synthetic-fixture"]
+            },
+            "required": { "type": "boolean" },
+            "fallbackAllowed": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "workload": {
+      "type": "object",
+      "required": ["kind", "dataset"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "synthetic-crud-retrieval",
+            "conversation-retrieval",
+            "conversation-qa",
+            "scale-sweep"
+          ]
+        },
+        "dataset": { "$ref": "#/$defs/datasetRef" },
+        "useBatchAdd": { "type": "boolean" },
+        "includeGetAll": { "type": "boolean" },
+        "includeDeleteAll": { "type": "boolean" },
+        "includeUpdate": { "type": "boolean" },
+        "scaleSizes": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "maxConversations": { "type": "integer", "minimum": 1 },
+        "maxQuestions": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "qaOptions": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "answerModel": { "type": "string" },
+        "judgeModel": { "type": "string" },
+        "skipJudge": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "name", "mode", "cachePolicy", "workload"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "mode": { "enum": ["exact-config", "best-effort-local", "shipped-defaults"] },
+        "cachePolicy": { "enum": ["cold", "warm", "mixed"] },
+        "workload": { "$ref": "#/$defs/workload" },
+        "config": {
+          "type": "object",
+          "properties": {
+            "common": { "type": "object" },
+            "python": { "type": "object" },
+            "typescript": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        "topK": { "type": "integer", "minimum": 1 },
+        "warmupRuns": { "type": "integer", "minimum": 0 },
+        "measuredRuns": { "type": "integer", "minimum": 1 },
+        "answering": { "$ref": "#/$defs/qaOptions" },
+        "judge": { "$ref": "#/$defs/qaOptions" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

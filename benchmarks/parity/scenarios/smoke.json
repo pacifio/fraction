@@ -1,0 +1,43 @@
+{
+  "suiteId": "parity-smoke",
+  "title": "Py vs TS Parity Smoke",
+  "tier": "strict-pipeline",
+  "runtimeTargets": ["python", "typescript"],
+  "warmupRuns": 1,
+  "measuredRuns": 1,
+  "topK": 15,
+  "scopeMode": "normalized",
+  "outputDir": "benchmarks/parity/reports",
+  "scenarios": [
+    {
+      "id": "conversation-smoke",
+      "name": "Conversation Retrieval Smoke on Real LoCoMo",
+      "mode": "best-effort-local",
+      "cachePolicy": "warm",
+      "workload": {
+        "kind": "conversation-retrieval",
+        "dataset": {
+          "type": "conversation-manifest",
+          "manifest": "benchmarks/parity/datasets/locomo.manifest.json",
+          "datasetLabel": "real-locomo",
+          "required": true,
+          "fallbackAllowed": false
+        },
+        "maxConversations": 1,
+        "maxQuestions": 3
+      },
+      "config": {
+        "common": {
+          "topK": 15,
+          "compressionRate": 0.6
+        },
+        "python": {
+          "compressorType": "off"
+        },
+        "typescript": {
+          "compressorType": "off"
+        }
+      }
+    }
+  ]
+}

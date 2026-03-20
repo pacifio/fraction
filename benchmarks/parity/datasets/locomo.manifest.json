@@ -1,0 +1,6 @@
+{
+  "datasetId": "locomo10",
+  "version": "1.0.0",
+  "path": "benchmarks/dataset/locomo10.json",
+  "datasetLabel": "real-locomo"
+}

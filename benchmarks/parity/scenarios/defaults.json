@@ -1,0 +1,35 @@
+{
+  "suiteId": "parity-defaults",
+  "title": "Py vs TS Shipped Defaults",
+  "tier": "shipped-defaults",
+  "runtimeTargets": ["python", "typescript"],
+  "warmupRuns": 3,
+  "measuredRuns": 5,
+  "topK": 15,
+  "scopeMode": "normalized",
+  "outputDir": "benchmarks/parity/reports",
+  "scenarios": [
+    {
+      "id": "conversation-defaults",
+      "name": "Conversation Retrieval with Shipped Defaults on Real LoCoMo",
+      "mode": "shipped-defaults",
+      "cachePolicy": "warm",
+      "workload": {
+        "kind": "conversation-retrieval",
+        "dataset": {
+          "type": "conversation-manifest",
+          "manifest": "benchmarks/parity/datasets/locomo.manifest.json",
+          "datasetLabel": "real-locomo",
+          "required": true,
+          "fallbackAllowed": false
+        }
+      },
+      "config": {
+        "common": {
+          "topK": 15,
+          "compressionRate": 0.6
+        }
+      }
+    }
+  ]
+}

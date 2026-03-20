@@ -1,0 +1,47 @@
+{
+  "suiteId": "parity-qa",
+  "title": "Py vs TS End-to-End QA Parity",
+  "tier": "strict-pipeline",
+  "runtimeTargets": ["python", "typescript"],
+  "warmupRuns": 1,
+  "measuredRuns": 2,
+  "topK": 15,
+  "scopeMode": "normalized",
+  "outputDir": "benchmarks/parity/reports",
+  "scenarios": [
+    {
+      "id": "conversation-qa",
+      "name": "Conversation QA on Real LoCoMo Dataset",
+      "mode": "best-effort-local",
+      "cachePolicy": "warm",
+      "workload": {
+        "kind": "conversation-qa",
+        "dataset": {
+          "type": "conversation-manifest",
+          "manifest": "benchmarks/parity/datasets/locomo.manifest.json",
+          "datasetLabel": "real-locomo",
+          "required": true,
+          "fallbackAllowed": false
+        }
+      },
+      "answering": {
+        "enabled": true,
+        "answerModel": "gpt-4o",
+        "judgeModel": "gpt-4o-mini",
+        "skipJudge": false
+      },
+      "config": {
+        "common": {
+          "topK": 15,
+          "compressionRate": 0.6
+        },
+        "python": {
+          "compressorType": "off"
+        },
+        "typescript": {
+          "compressorType": "off"
+        }
+      }
+    }
+  ]
+}

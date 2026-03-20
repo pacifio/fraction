@@ -157,6 +157,16 @@ ENV/
 env.bak/
 venv.bak/
 
+# Fraction local runtime state
+.fraction/
+
+# Parity benchmark generated artifacts
+.benchmark-parity/
+benchmarks/parity/reports/
+
+# Local benchmark / script scratch space
+.tmp/
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -229,6 +239,11 @@ locomo10_rag.json
 *.usearch
 *.faiss
 *.db
+
+# Temporary SQLite files created by tests
+.tmp-fraction*.sqlite
+.tmp-fraction*.sqlite-wal
+.tmp-fraction*.sqlite-shm
 
 # Ruff stuff:
 .ruff_cache/
