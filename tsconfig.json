@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/fraction"
+    },
+    {
+      "path": "./packages/vercel-ai"
+    },
+    {
+      "path": "./packages/tanstack-ai"
+    }
+  ]
+}

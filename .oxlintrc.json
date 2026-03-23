@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "docs/**",
+    "fraction/**",
+    "tests/**",
+    "reports/**",
+    "dist/**",
+    "node_modules/**",
+    "**/*.d.ts",
+    "packages/*/dist/**",
+    "packages/*/*.tsbuildinfo",
+    ".benchmark-fraction/**"
+  ],
+  "options": {
+    "typeAware": true
+  },
+  "env": {
+    "node": true
+  },
+  "globals": {
+    "Bun": "readonly"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts"],
+      "globals": {
+        "afterEach": "readonly",
+        "beforeEach": "readonly",
+        "describe": "readonly",
+        "expect": "readonly",
+        "test": "readonly"
+      }
+    }
+  ]
+}
