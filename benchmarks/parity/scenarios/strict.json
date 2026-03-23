@@ -1,0 +1,42 @@
+{
+  "suiteId": "parity-strict",
+  "title": "Py vs TS Strict Pipeline Parity",
+  "tier": "strict-pipeline",
+  "runtimeTargets": ["python", "typescript"],
+  "warmupRuns": 3,
+  "measuredRuns": 5,
+  "topK": 15,
+  "scopeMode": "normalized",
+  "outputDir": "benchmarks/parity/reports",
+  "scenarios": [
+    {
+      "id": "conversation-retrieval",
+      "name": "Conversation Retrieval on Real LoCoMo Dataset",
+      "mode": "best-effort-local",
+      "cachePolicy": "warm",
+      "conversationStrategy": "speaker-partitioned-merge-v1",
+      "workload": {
+        "kind": "conversation-retrieval",
+        "dataset": {
+          "type": "conversation-manifest",
+          "manifest": "benchmarks/parity/datasets/locomo.manifest.json",
+          "datasetLabel": "real-locomo",
+          "required": true,
+          "fallbackAllowed": false
+        }
+      },
+      "config": {
+        "common": {
+          "topK": 15,
+          "compressionRate": 0.6
+        },
+        "python": {
+          "compressorType": "off"
+        },
+        "typescript": {
+          "compressorType": "off"
+        }
+      }
+    }
+  ]
+}

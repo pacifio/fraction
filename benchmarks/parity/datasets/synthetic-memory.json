@@ -1,0 +1,108 @@
+{
+  "datasetId": "synthetic-memory-v1",
+  "version": "1.0.0",
+  "records": [
+    {
+      "id": "alice-berlin",
+      "content": "Alice moved to Berlin in 2023 and works at Acme Robotics.",
+      "scope": { "namespace": "parity", "userId": "alice" },
+      "metadata": { "topic": "profile", "city": "Berlin", "year": 2023 }
+    },
+    {
+      "id": "alice-dog",
+      "content": "Alice's dog Miso has a vet appointment next Tuesday morning.",
+      "scope": { "namespace": "parity", "userId": "alice" },
+      "metadata": { "topic": "pets", "pet": "Miso" }
+    },
+    {
+      "id": "alice-preferences",
+      "content": "Alice prefers concise technical answers with bullet points.",
+      "scope": { "namespace": "parity", "userId": "alice" },
+      "metadata": { "topic": "preferences", "style": "concise" }
+    },
+    {
+      "id": "alice-project",
+      "content": "Project Apollo started in March 2025 with Maya leading analytics.",
+      "scope": { "namespace": "parity", "userId": "alice", "runId": "project-apollo" },
+      "metadata": { "topic": "project", "project": "Apollo", "month": "March" }
+    },
+    {
+      "id": "bob-kyoto",
+      "content": "Bob plans to visit Kyoto in October 2024 and drink tea with Mr. Suzuki.",
+      "scope": { "namespace": "parity", "userId": "bob" },
+      "metadata": { "topic": "travel", "city": "Kyoto", "month": "October" }
+    },
+    {
+      "id": "bob-allergy",
+      "content": "Bob is allergic to peanuts and always checks restaurant menus carefully.",
+      "scope": { "namespace": "parity", "userId": "bob" },
+      "metadata": { "topic": "health", "allergy": "peanuts" }
+    }
+  ],
+  "queries": [
+    {
+      "id": "q-alice-city",
+      "query": "Where does Alice live now?",
+      "scope": { "namespace": "parity", "userId": "alice" },
+      "expectedIds": ["alice-berlin"],
+      "category": "semantic"
+    },
+    {
+      "id": "q-alice-pet",
+      "query": "What is Alice's dog's name?",
+      "scope": { "namespace": "parity", "userId": "alice" },
+      "expectedIds": ["alice-dog"],
+      "category": "lexical"
+    },
+    {
+      "id": "q-alice-style",
+      "query": "How should responses be formatted for Alice?",
+      "scope": { "namespace": "parity", "userId": "alice" },
+      "expectedIds": ["alice-preferences"],
+      "category": "semantic"
+    },
+    {
+      "id": "q-project-month",
+      "query": "When did Project Apollo start?",
+      "scope": { "namespace": "parity", "userId": "alice", "runId": "project-apollo" },
+      "expectedIds": ["alice-project"],
+      "category": "temporal"
+    },
+    {
+      "id": "q-bob-allergy",
+      "query": "What allergy does Bob have?",
+      "scope": { "namespace": "parity", "userId": "bob" },
+      "expectedIds": ["bob-allergy"],
+      "category": "lexical"
+    },
+    {
+      "id": "q-bob-travel-filtered",
+      "query": "Who plans to drink tea with Mr. Suzuki?",
+      "scope": { "namespace": "parity", "userId": "bob" },
+      "filter": { "field": "topic", "op": "eq", "value": "travel" },
+      "expectedIds": ["bob-kyoto"],
+      "category": "filter"
+    }
+  ],
+  "mutations": {
+    "updates": [
+      {
+        "id": "alice-berlin",
+        "scope": { "namespace": "parity", "userId": "alice" },
+        "content": "Alice moved to Munich in 2024 and now works at Acme Robotics.",
+        "expectedContentIncludes": "Munich"
+      }
+    ],
+    "deletes": [
+      {
+        "id": "bob-allergy",
+        "scope": { "namespace": "parity", "userId": "bob" }
+      }
+    ],
+    "deleteAll": [
+      {
+        "scope": { "namespace": "parity", "userId": "alice" }
+      }
+    ]
+  }
+}

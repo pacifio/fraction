@@ -1,0 +1,28 @@
+{
+  "name": "@fraction/tanstack-ai",
+  "version": "0.0.0",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm && bun x tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "check": "bun x tsc -p tsconfig.json --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@tanstack/ai": "0.8.1",
+    "effect": "4.0.0-beta.33",
+    "fraction": "workspace:*"
+  }
+}

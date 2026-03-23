@@ -1,0 +1,100 @@
+{
+  "scripts": [
+    {
+      "name": "build",
+      "command": "npm run build",
+      "mode": "command",
+      "category": "build"
+    },
+    {
+      "name": "check",
+      "command": "npm run check",
+      "mode": "command",
+      "category": "typecheck"
+    },
+    {
+      "name": "lint",
+      "command": "npm run lint",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "lint:ox",
+      "command": "npm run lint:ox",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "lint:ox:fraction",
+      "command": "npm run lint:ox:fraction",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "lint:ox:vercel-ai",
+      "command": "npm run lint:ox:vercel-ai",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "lint:ox:tanstack-ai",
+      "command": "npm run lint:ox:tanstack-ai",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "lint:ox:benchmarks",
+      "command": "npm run lint:ox:benchmarks",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "lint:fix",
+      "command": "npm run lint:fix",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "fmt",
+      "command": "npm run fmt",
+      "mode": "command",
+      "category": "format"
+    },
+    {
+      "name": "fmt:check",
+      "command": "npm run fmt:check",
+      "mode": "command",
+      "category": "other"
+    },
+    {
+      "name": "test",
+      "command": "npm run test",
+      "mode": "command",
+      "category": "test"
+    },
+    {
+      "name": "benchmark:sdk",
+      "command": "npm run benchmark:sdk",
+      "mode": "command",
+      "category": "other"
+    },
+    {
+      "name": "python:test",
+      "command": "pytest",
+      "mode": "command",
+      "category": "test"
+    },
+    {
+      "name": "python:lint",
+      "command": "ruff check .",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "format",
+      "command": "ruff format .",
+      "mode": "command",
+      "category": "format"
+    }
+  ]
+}

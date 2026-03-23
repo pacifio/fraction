@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "baseUrl": "../..",
+    "paths": {
+      "fraction": ["packages/fraction/dist/index.d.ts"],
+      "fraction/effect": ["packages/fraction/dist/effect.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
